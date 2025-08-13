@@ -3,7 +3,7 @@
 // requires auth.php in the same folder (session + require_auth())
 // require_once __DIR__ . '/auth.php';
 // require_auth();
-$user = $_SESSION['user'] ?? ['name' => 'John Doe'];
+$user = $_SESSION['user'] ?? ['name' => 'Jaimin Parmar'];
 $userName = htmlspecialchars($user['name']);
 ?>
 <!DOCTYPE html>

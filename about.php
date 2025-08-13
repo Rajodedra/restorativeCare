@@ -370,12 +370,12 @@ document.addEventListener('DOMContentLoaded', function () {
         </div>
         <div>
           <div class="font-extrabold mb-2">Connect</div>
-          <a href="#" class="block muted text-sm mb-1">Twitter</a>
-          <a href="#" class="block muted text-sm mb-1">LinkedIn</a>
-          <a href="#" class="block muted text-sm">Email Us</a>
-        </div>
+          <a href="https://www.linkedin.com/in/jaimin-parmar-a4a62a332 " class="block muted text-sm mb-1">Linkedin</a>
+          <a href="https://www.instagram.com/jaimin_26807/" class="block muted text-sm mb-1">InstragramJaimin</a>
+          <a href="jaiminparmar2687@gmail.com" class="block muted text-sm">Email Us</a>
+        </div>  
       </div>
-      <div class="mt-5 text-center muted text-xs">© <?php echo $year; ?> RestorativeCare. All rights reserved.</div>
+      <div class="mt-5 text-center muted text-xs">© <?php echo $year; ?> RestorativeCare. All rights reserved. by Jaimin Parmar </div>
     </div>
   </footer>
 

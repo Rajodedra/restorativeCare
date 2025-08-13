@@ -334,17 +334,38 @@ $year = date('Y');
           </div>
         </div>
       </div>
-      <div class="relative animate__animated animate__fadeInRight">
-        <div id="heroLottie" class="glass shadow-deep" style="height:420px;border-radius:20px; overflow:hidden"></div>
-        <div class="absolute -bottom-4 -left-6 glass p-3 rounded-xl shadow-deep">
+     <div class="relative animate__animated animate__fadeInRight">
+  <div class="glass shadow-deep overflow-hidden rounded-2xl flex items-center justify-center" style="height:420px; width:100%;">
+    <i data-feather="heart" class="w-32 h-32 text-cyan-500"></i>
+  </div>
+  <div class="absolute -bottom-4 -left-6 glass p-3 rounded-xl shadow-deep">
+    <div class="text-xs muted">Today</div>
+    <div class="font-extrabold text-lg">12 Appointments</div>
+  </div>
+  <div class="absolute -top-6 -right-6 glass p-3 rounded-xl shadow-deep">
+    <div class="text-xs muted">Bed Availability</div>
+    <div class="font-extrabold text-lg"><span id="bedsFree">34</span> / 48</div>
+  </div>
+</div>
+
+
+  <div class="absolute -top-6 -right-6 glass p-3 rounded-xl shadow-deep">
+    <div class="text-xs muted">Bed Availability</div>
+    <div class="font-extrabold text-lg"><span id="bedsFree">34</span> / 48</div>
+  </div>
+</div>
+
+
+       
+        <!-- <div class="absolute -bottom-4 -left-6 glass p-3 rounded-xl shadow-deep">
           <div class="text-xs muted">Today</div>
           <div class="font-extrabold text-lg">12 Appointments</div>
-        </div>
+        </div> -->
         <div class="absolute -top-6 -right-6 glass p-3 rounded-xl shadow-deep">
           <div class="text-xs muted">Bed Availability</div>
           <div class="font-extrabold text-lg"><span id="bedsFree">34</span> / 48</div>
         </div>
-      </div>
+      
     </div>
   </section>
 
@@ -352,7 +373,7 @@ $year = date('Y');
   <section id="features-showcase" class="px-4 md:px-6 mt-14">
     <div class="text-center">
       <div class="text-sm uppercase tracking-widest text-cyan-600 font-extrabold">Discover</div>
-      <h2 class="text-3xl md:text-4xl font-extrabold mt-2">Everything in One Calm Workspace</h2>
+      <h2 class="text-3xl md:text-4xl font-extrabold mt-2">Everything in One Calm Workspace<hr><span class="accent text-cyan-600">By Dr. Jaimin Parmar Ms(IIT Dholakpur)</span></h2>
       <!-- <p class="muted max-w-3xl mx-auto mt-2">
         Not a basic grid. Explore our features in a gently rotating 3D space. Click any tile to open its page.
       </p> -->
