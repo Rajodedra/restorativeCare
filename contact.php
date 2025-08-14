@@ -114,6 +114,7 @@ $year = date('Y');
       <div class="nav-links hidden md:flex items-center gap-1">
         <a href="index.php">Home</a>
         <!-- <a href="features.php">Features</a> -->
+        <a href="blog.php">Blog</a>
         <a href="about.php">About</a>
         <a class="font-extrabold" href="contact.php">Contact</a>
       </div>
@@ -125,7 +126,7 @@ $year = date('Y');
     </nav>
     <div id="mobileMenu" class="glass mt-2 p-3 hidden md:hidden">
       <a href="index.php" class="block p-2 rounded hover:bg-cyan-50">Home</a>
-      <a href="features.php" class="block p-2 rounded hover:bg-cyan-50">Features</a>
+      <a href="blog.php" class="block p-2 rounded hover:bg-cyan-50">Blog</a>
       <a href="about.php" class="block p-2 rounded hover:bg-cyan-50">About</a>
       <a href="contact.php" class="block p-2 rounded hover:bg-cyan-50">Contact</a>
       <a href="dashboard.php" class="block p-2 rounded hover:bg-cyan-50">Dashboard</a>

@@ -280,34 +280,55 @@ if (file_exists(__DIR__ . '/auth.php')) {
       </form>
     </section>
 
-    <!-- right: preview, QR, tips -->
-    <aside class="space-y-4">
-      <div class="glass rounded-xl p-4 reveal tilt float-slow">
-        <h4 class="font-semibold mb-2">Quick Preview</h4>
-        <div id="miniPreview" class="text-sm text-gray-700">Complete steps to see preview.</div>
-      </div>
+   <!-- right: preview, QR, tips -->
+<aside class="space-y-4">
+  <div class="glass rounded-xl p-4 reveal tilt float-slow">
+    <h4 class="font-semibold mb-2">Ward Selection</h4>
 
-      <div class="glass rounded-xl p-4 reveal">
-        <h4 class="font-semibold mb-2">Ward Availability (live mock)</h4>
-        <img src="https://i.imgur.com/1Q9Z1Zs.png" alt="ward map" class="w-full rounded-md mb-2">
-        <div class="text-xs text-gray-500">Green beds are available (mock). Click a bed on the left to reserve.</div>
-      </div>
+    <!-- Ward Selector -->
+    <label for="wardSelect" class="block text-sm font-medium text-gray-600 mb-1">Select Ward</label>
+    <select id="wardSelect" class="w-full p-2 border rounded-md text-sm mb-3">
+      <option value="">-- Choose Ward --</option>
+      <option value="A">Ward A</option>
+      <option value="B">Ward B</option>
+      <option value="C">Ward C</option>
+    </select>
 
-      <div class="glass rounded-xl p-4 reveal">
-        <h4 class="font-semibold mb-2">QR Card</h4>
-        <div id="qrcode" class="w-full flex items-center justify-center py-2"></div>
-        <div id="qrText" class="text-xs text-gray-500 mt-2">QR will appear after admission</div>
-      </div>
+    <!-- Bed Selector -->
+    <label for="bedSelect" class="block text-sm font-medium text-gray-600 mb-1">Select Bed</label>
+    <select id="bedSelect" class="w-full p-2 border rounded-md text-sm mb-3">
+      <option value="">-- Choose Bed --</option>
+      <option value="1">Bed 1</option>
+      <option value="2">Bed 2</option>
+      <option value="3">Bed 3</option>
+      <option value="4">Bed 4</option>
+      <option value="5">Bed 5</option>
+    </select>
 
-      <div class="glass rounded-xl p-4 reveal">
-        <h4 class="font-semibold mb-2">Pro Tips</h4>
-        <ul class="text-sm text-gray-600 space-y-2">
-          <li>Use <strong>Suggest (AI)</strong> to auto-fill demo data.</li>
-          <li>Use <strong>Voice Input</strong> for quick entry.</li>
-          <li>Download the PDF and scan the QR to open the patient dashboard.</li>
-        </ul>
-      </div>
-    </aside>
+    <!-- Live Preview -->
+    <div id="miniPreview" class="text-sm text-gray-700">
+      Complete steps to see preview.
+    </div>
+  </div>
+</aside>
+
+<script>
+  const wardSelect = document.getElementById('wardSelect');
+  const bedSelect = document.getElementById('bedSelect');
+  const miniPreview = document.getElementById('miniPreview');
+
+  function updatePreview() {
+    if (wardSelect.value && bedSelect.value) {
+      miniPreview.textContent = `Selected: Ward ${wardSelect.value} - Bed ${bedSelect.value}`;
+    } else {
+      miniPreview.textContent = "Complete steps to see preview.";
+    }
+  }
+
+  wardSelect.addEventListener('change', updatePreview);
+  bedSelect.addEventListener('change', updatePreview);
+</script>
+
   </main>
 
   <footer class="mt-6 text-center text-xs text-gray-500">&copy; <?php echo date('Y'); ?> RestorativeCare — Demo</footer>

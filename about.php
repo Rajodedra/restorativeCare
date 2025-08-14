@@ -106,6 +106,7 @@ $year = date('Y');
       <div class="nav-links hidden md:flex items-center gap-1">
         <a href="index.php">Home</a>
         <!-- <a href="features.php">Features</a> -->
+         <a href="blog.php">Blog</a>
         <a class="font-extrabold" href="about.php">About</a>
         <a href="contact.php">Contact</a>
       </div>

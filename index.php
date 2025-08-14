@@ -26,6 +26,23 @@ $year = date('Y');
   <script src="https://unpkg.com/feather-icons"></script>
 
   <style>
+    @keyframes tubePulse {
+  0%   { stroke-width: 6; filter: drop-shadow(0 4px 12px #38bdf880);}
+  50%  { stroke-width: 10; filter: drop-shadow(0 8px 24px #0ea5b770);}
+  100% { stroke-width: 6; filter: drop-shadow(0 4px 12px #38bdf880);}
+}
+.tube-animate {
+  animation: tubePulse 2.2s infinite cubic-bezier(.3,.8,.3,1);
+  transition: stroke-width 0.6s;
+}
+.animate-stethoscope {
+  animation: fadeInUp 1.4s both;
+}
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(60px);}
+  to   { opacity: 1; transform: translateY(0);}
+}
+
     :root{
       --bg1:#f0faff;
       --bg2:#ffffff;
@@ -335,9 +352,27 @@ $year = date('Y');
         </div>
       </div>
      <div class="relative animate__animated animate__fadeInRight">
-  <div class="glass shadow-deep overflow-hidden rounded-2xl flex items-center justify-center" style="height:420px; width:100%;">
-    <i data-feather="heart" class="w-32 h-32 text-cyan-500"></i>
-  </div>
+  <div class="glass shadow-deep overflow-hidden rounded-2xl flex items-center justify-center animate-stethoscope" style="height:520px; width:100%;">
+  <!-- 3D Animated Stethoscope SVG -->
+  <svg width="240px" height="240px" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Animated 3D Stethoscope Illustration">
+    <ellipse cx="40" cy="74" rx="28" ry="6" fill="#D1F3F8"/>
+    <path class="tube-animate" d="M40 60C54 48 58 32 52 20" stroke="url(#tube-gradient)" stroke-width="6" stroke-linecap="round"/>
+    <path class="tube-animate" d="M40 60C26 48 22 32 28 20" stroke="url(#tube-gradient)" stroke-width="6" stroke-linecap="round"/>
+    <circle cx="40" cy="60" r="13" fill="#38BDF8" stroke="#0EA5B7" stroke-width="4"/>
+    <circle cx="28" cy="18" r="7" fill="#94A3B8" stroke="#2DD4BF" stroke-width="3"/>
+    <circle cx="52" cy="18" r="7" fill="#94A3B8" stroke="#2DD4BF" stroke-width="3"/>
+    <ellipse cx="42" cy="62" rx="4.5" ry="2.2" fill="#F0FDFA"/>
+    <ellipse cx="51" cy="19" rx="2.5" ry="1.1" fill="#F0FDFA"/>
+    <ellipse cx="29" cy="19" rx="2.5" ry="1.1" fill="#F0FDFA"/>
+    <defs>
+      <linearGradient id="tube-gradient" x1="40" y1="60" x2="40" y2="20" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#38BDF8"/>
+        <stop offset="1" stop-color="#0EA5B7"/>
+      </linearGradient>
+    </defs>
+  </svg>
+</div>
+
   <div class="absolute -bottom-4 -left-6 glass p-3 rounded-xl shadow-deep">
     <div class="text-xs muted">Today</div>
     <div class="font-extrabold text-lg">12 Appointments</div>
