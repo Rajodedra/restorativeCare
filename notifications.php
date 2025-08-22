@@ -110,6 +110,7 @@ $year = date('Y');
 
     <div class="flex items-center gap-3">
       <!-- theme selector -->
+       <a href="index.php">Home</a>
       <select id="themeSelect" class="p-2 rounded border">
         <option value="calm">Calm</option>
         <option value="nature">Nature</option>

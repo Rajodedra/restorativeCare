@@ -1,505 +1,888 @@
 <?php
-// mental-health.php - Full static demo (single-file)
-// No DB/auth/localStorage — purely static demo data for hackathon presentation.
-$patientName = 'Riya Patel';
+/* =============================================================================
+   RestorativeCare — Mental Health (Single File: UI + Logic + DB)
+   -----------------------------------------------------------------------------
+   What this file does:
+   - Uses your SESSION format: $_SESSION['user'] = ['id','name','role']
+   - Uses mysqli; reuses $conn or $mysqli if provided by your app
+   - Patients auto-load their own data; staff can select a patient or pass ?patient_id=#
+   - Mood logging with 5-min rate limit, notifications to admin/superadmin on negative moods
+   - Trend & distribution charts (Chart.js)
+   - Appointments list (upcoming)
+   - PHQ-9 with auto-scoring; stores to mh_assessments/mh_assessment_items if present
+   - Safety Plan (versioned by insert) if safety_plans table exists
+   - CSV export, date filters, quick patient search
+   - Minimal neutral UI markup so your existing theme styles it; no new CSS imported
+   - JSON endpoints for mini AJAX use (kept in the same file using ?ajax=... to avoid extra files)
+
+   NOTE:
+   - If your app has header/sidebar/footer includes, uncomment the include lines where indicated.
+   - No schema changes required to run. Optional tables are detected automatically.
+   ========================================================================== */
+
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
+
+// ------------------------------ Security headers -----------------------------
+header('X-Frame-Options: SAMEORIGIN');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+
+// ------------------------------ Helpers --------------------------------------
+function esc($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+function is_post(){ return (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST'); }
+function method(){ return $_SERVER['REQUEST_METHOD'] ?? 'GET'; }
+function now(){ return date('Y-m-d H:i:s'); }
+function csrf_token(){ if(empty($_SESSION['csrf_mh'])) $_SESSION['csrf_mh']=bin2hex(random_bytes(32)); return $_SESSION['csrf_mh']; }
+function csrf_check($t){ return isset($_SESSION['csrf_mh']) && hash_equals($_SESSION['csrf_mh'], (string)$t); }
+function url_base(){
+  $uri = strtok($_SERVER['REQUEST_URI'],'?');
+  $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS']!=='off') ? 'https':'http';
+  $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+  return $scheme.'://'.$host.$uri;
+}
+function flash_set($k,$v){ $_SESSION['__flash'][$k]=(string)$v; }
+function flash_get($k){ if(!empty($_SESSION['__flash'][$k])){ $v=$_SESSION['__flash'][$k]; unset($_SESSION['__flash'][$k]); return $v; } return ''; }
+
+// ------------------------------ Auth check -----------------------------------
+if (empty($_SESSION['user']) || !isset($_SESSION['user']['id'])) {
+  header("Location: login.php");
+  exit;
+}
+$AUTH_ID   = (int)$_SESSION['user']['id'];
+$AUTH_NAME = (string)$_SESSION['user']['name'];
+$AUTH_ROLE = (string)$_SESSION['user']['role'];
+
+// ------------------------------ DB connection --------------------------------
+// Reuse existing mysqli ($conn) if your app already created it.
+$mysqli = null;
+if (isset($conn) && $conn instanceof mysqli) { $mysqli = $conn; }
+elseif (isset($mysqli) && $mysqli instanceof mysqli) { /* already set */ }
+else {
+  // Fallback to the same defaults you used in login.php
+  $DB_HOST='localhost'; $DB_USER='root'; $DB_PASS=''; $DB_NAME='restorativecare'; $DB_PORT=3307;
+  $mysqli = @mysqli_connect($DB_HOST, $DB_USER, $DB_PASS, $DB_NAME, $DB_PORT);
+  if(!$mysqli){ http_response_code(500); die('DB connection failed.'); }
+  $mysqli->set_charset('utf8mb4');
+}
+function q($mysqli,$sql,$types='',$params=[]){
+  $stmt=$mysqli->prepare($sql);
+  if(!$stmt){ throw new Exception('Prepare failed: '.$mysqli->error); }
+  if($types){ $stmt->bind_param($types, ...$params); }
+  if(!$stmt->execute()){ $e=$stmt->error; $stmt->close(); throw new Exception('Execute failed: '.$e); }
+  return $stmt;
+}
+function has_table($mysqli, $tbl){
+  try{
+    $stmt = q($mysqli, "SHOW TABLES LIKE ?", "s", [$tbl]);
+    $res = $stmt->get_result(); $ok = (bool)$res->fetch_row(); $stmt->close();
+    return $ok;
+  } catch(Throwable $e){ return false; }
+}
+function patient_id_for_user($mysqli, $user_id){
+  $stmt = q($mysqli, "SELECT id FROM patients WHERE user_id=? LIMIT 1", "i", [$user_id]);
+  $res = $stmt->get_result(); $row = $res->fetch_assoc(); $stmt->close();
+  return $row ? (int)$row['id'] : 0;
+}
+function get_patient_brief($mysqli, $patient_id){
+  $stmt = q($mysqli, "SELECT p.id, u.name, u.email, u.phone, p.dob, p.gender, p.address
+                      FROM patients p JOIN users u ON u.id=p.user_id
+                      WHERE p.id=? LIMIT 1","i",[$patient_id]);
+  $res = $stmt->get_result(); $row = $res->fetch_assoc(); $stmt->close();
+  return $row ?: null;
+}
+function is_staff($role){ return in_array($role, ['doctor','nurse','admin','superadmin'], true); }
+
+// ------------------------------ Resolve patient ------------------------------
+$patient_id = 0;
+if ($AUTH_ROLE === 'patient') {
+  $patient_id = patient_id_for_user($mysqli, $AUTH_ID);
+  if(!$patient_id){ die("No patient record found for your account."); }
+} else {
+  $patient_id = isset($_GET['patient_id']) ? max(0, (int)$_GET['patient_id']) : 0;
+}
+
+// ------------------------------ Feature flags --------------------------------
+$HAS_ASSESS  = has_table($mysqli, 'mh_assessments') && has_table($mysqli, 'mh_assessment_items');
+$HAS_SAFETY  = has_table($mysqli, 'safety_plans');
+$HAS_AUDIT   = has_table($mysqli, 'audit_logs');          // optional if you added it
+$HAS_CONSENT = has_table($mysqli, 'mh_consents');         // optional if you added it
+
+// ------------------------------ Audit (optional) -----------------------------
+function audit_log($mysqli, $who, $action, $object_type, $object_id, $extra=''){
+  global $HAS_AUDIT;
+  if(!$HAS_AUDIT) return;
+  try{
+    q($mysqli, "INSERT INTO audit_logs (user_id, action, object_type, object_id, meta, created_at) VALUES (?,?,?,?,?,NOW())",
+      "issis", [(int)$who, (string)$action, (string)$object_type, (int)$object_id, (string)$extra])->close();
+  }catch(Throwable $e){ /* ignore */ }
+}
+
+// ------------------------------ Consent check (optional) ---------------------
+function consent_ok($mysqli, $patient_id, $scope='general'){
+  global $HAS_CONSENT;
+  if(!$HAS_CONSENT) return true; // if not present, allow
+  try{
+    $stmt = q($mysqli, "SELECT granted FROM mh_consents WHERE patient_id=? AND scope=? ORDER BY granted_at DESC LIMIT 1","is",[$patient_id,$scope]);
+    $res = $stmt->get_result(); $row=$res->fetch_assoc(); $stmt->close();
+    if(!$row) return true; // default allow if nothing set
+    return (bool)$row['granted'];
+  }catch(Throwable $e){ return true; }
+}
+
+// ------------------------------ JSON/AJAX endpoints --------------------------
+if (isset($_GET['ajax'])) {
+  header('Content-Type: application/json');
+  $ajax = (string)$_GET['ajax'];
+
+  // only allow staff to query arbitrary patients
+  $pid = ($AUTH_ROLE==='patient') ? patient_id_for_user($mysqli,$AUTH_ID) : (int)($_GET['patient_id'] ?? 0);
+  if ($pid <= 0 && $AUTH_ROLE==='patient') { echo json_encode(['ok'=>false,'error'=>'No patient record']); exit; }
+
+  // date filters
+  $from = $_GET['from'] ?? '';
+  $to   = $_GET['to'] ?? '';
+  $rangeSql = " AND logged_at >= (NOW() - INTERVAL 60 DAY) ";
+  $types = "i";
+  $params = [$pid];
+
+  if ($from !== '' && $to !== '') {
+    $rangeSql = " AND logged_at BETWEEN ? AND ? ";
+    $types = "iss";
+    $params = [$pid, $from, $to];
+  }
+
+  // mood logs list
+  if ($ajax === 'mood_logs') {
+    if(!$pid){ echo json_encode(['ok'=>false,'error'=>'patient_id required']); exit; }
+    // RBAC: patients can only see self
+    if($AUTH_ROLE==='patient' && $pid !== patient_id_for_user($mysqli,$AUTH_ID)){
+      echo json_encode(['ok'=>false,'error'=>'forbidden']); exit;
+    }
+    $stmt = q($mysqli, "SELECT id, mood, note, DATE_FORMAT(logged_at, '%Y-%m-%d %H:%i:%s') as logged_at
+                        FROM mood_logs
+                        WHERE patient_id=? {$rangeSql}
+                        ORDER BY logged_at ASC", $types, $params);
+    $res = $stmt->get_result(); $rows=[]; while($r=$res->fetch_assoc()){ $rows[]=$r; }
+    $stmt->close();
+    echo json_encode(['ok'=>true,'rows'=>$rows]); exit;
+  }
+
+  // mood distribution aggregate
+  if ($ajax === 'mood_agg') {
+    if(!$pid){ echo json_encode(['ok'=>false,'error'=>'patient_id required']); exit; }
+    if($AUTH_ROLE==='patient' && $pid !== patient_id_for_user($mysqli,$AUTH_ID)){
+      echo json_encode(['ok'=>false,'error'=>'forbidden']); exit;
+    }
+    $stmt = q($mysqli, "SELECT mood, COUNT(*) c FROM mood_logs
+                        WHERE patient_id=? {$rangeSql}
+                        GROUP BY mood", $types, $params);
+    $res = $stmt->get_result(); $agg=[]; while($r=$res->fetch_assoc()){ $agg[$r['mood']]=(int)$r['c']; }
+    $stmt->close();
+    echo json_encode(['ok'=>true,'agg'=>$agg]); exit;
+  }
+
+  // patient search (staff only)
+  if ($ajax === 'patient_search') {
+    if(!is_staff($AUTH_ROLE)){ echo json_encode(['ok'=>false,'error'=>'forbidden']); exit; }
+    $qStr = trim((string)($_GET['q'] ?? ''));
+    if($qStr===''){ echo json_encode(['ok'=>true,'rows'=>[]]); exit; }
+    $like = '%'.$qStr.'%';
+    $stmt = q($mysqli, "SELECT p.id, u.name, u.email
+                        FROM patients p JOIN users u ON u.id=p.user_id
+                        WHERE u.name LIKE ? OR u.email LIKE ?
+                        ORDER BY u.name ASC LIMIT 15","ss",[$like,$like]);
+    $res = $stmt->get_result(); $rows=[]; while($r=$res->fetch_assoc()){ $rows[]=$r; }
+    $stmt->close();
+    echo json_encode(['ok'=>true,'rows'=>$rows]); exit;
+  }
+
+  echo json_encode(['ok'=>false,'error'=>'unknown']); exit;
+}
+
+// ------------------------------ Rate limit helper ----------------------------
+function recent_mood_count($mysqli, $pid){
+  $stmt = q($mysqli, "SELECT COUNT(*) c FROM mood_logs WHERE patient_id=? AND logged_at >= (NOW() - INTERVAL 5 MINUTE)", "i", [$pid]);
+  $res = $stmt->get_result(); $row = $res->fetch_assoc(); $stmt->close();
+  return (int)($row['c'] ?? 0);
+}
+
+// ------------------------------ Notifications --------------------------------
+function notify_admins($mysqli, $message, $urgency='high'){
+  $stmt = q($mysqli, "SELECT id FROM users WHERE role IN ('admin','superadmin')");
+  $res  = $stmt->get_result();
+  while($u = $res->fetch_assoc()){
+    q($mysqli, "INSERT INTO notifications (user_id, message, urgency) VALUES (?,?,?)", "iss",
+      [(int)$u['id'], (string)$message, (string)$urgency])->close();
+  }
+  $stmt->close();
+}
+function notify_admins_negative_mood($mysqli, $mood, $pid){
+  if (!in_array($mood, ['sad','anxious','angry'], true)) return;
+  $msg = "New {$mood} mood log for patient #{$pid}";
+  notify_admins($mysqli, $msg, 'high');
+}
+
+// ------------------------------ POST handlers --------------------------------
+try {
+  if (is_post()) {
+    if (!csrf_check($_POST['_csrf'] ?? '')) { throw new Exception('Invalid CSRF token'); }
+    $action = (string)($_POST['action'] ?? '');
+
+    // Patient context for posts
+    $pid = ($AUTH_ROLE === 'patient') ? patient_id_for_user($mysqli, $AUTH_ID)
+                                      : max(0, (int)($_POST['patient_id'] ?? $patient_id));
+
+    if ($action === 'mood_create') {
+      if ($pid <= 0) throw new Exception('Select a patient first.');
+      $allowed = ['happy','neutral','sad','anxious','angry'];
+      $mood = in_array($_POST['mood'] ?? '', $allowed, true) ? $_POST['mood'] : 'neutral';
+      $note = trim((string)($_POST['note'] ?? ''));
+      // rate limit
+      if (recent_mood_count($mysqli, $pid) > 0) {
+        flash_set('mh_ok','You logged a mood recently. Please try again in a few minutes.');
+      } else {
+        q($mysqli, "INSERT INTO mood_logs (patient_id, mood, note, logged_at) VALUES (?,?,?,NOW())", "iss", [$pid,$mood,$note])->close();
+        notify_admins_negative_mood($mysqli, $mood, $pid);
+        audit_log($mysqli, $AUTH_ID, 'create', 'mood_log', $pid, $mood);
+        flash_set('mh_ok','Mood saved.');
+      }
+      header("Location: ".url_base().($pid?("?patient_id=".$pid):"")); exit;
+    }
+
+    if ($action === 'phq9_save') {
+      if ($pid <= 0) throw new Exception('Select a patient first.');
+      $items = [];
+      for($i=1;$i<=9;$i++){
+        $v = (int)($_POST["phq9_$i"] ?? 0);
+        if ($v < 0 || $v > 3) $v = 0;
+        $items[$i] = $v;
+      }
+      $total = array_sum($items);
+
+      if ($HAS_ASSESS) {
+        $stmt = q($mysqli, "INSERT INTO mh_assessments (patient_id, type, total_score, taken_at, created_by) VALUES (?,?,?,?,?)",
+          "isisi", [$pid, 'PHQ-9', $total, now(), $AUTH_ID]);
+        $aid = $mysqli->insert_id; $stmt->close();
+
+        $ins = $mysqli->prepare("INSERT INTO mh_assessment_items (assessment_id, item_no, score) VALUES (?,?,?)");
+        if($ins){ for($i=1;$i<=9;$i++){ $ins->bind_param("iii", $aid, $i, $items[$i]); $ins->execute(); } $ins->close(); }
+
+        if ($total >= 20 || $items[9] > 0) {
+          notify_admins($mysqli, "PHQ-9 alert (score {$total}) for patient #{$pid}", 'high');
+        }
+        audit_log($mysqli, $AUTH_ID, 'create', 'assessment', $pid, "PHQ-9:{$total}");
+        flash_set('mh_ok', "PHQ-9 saved (Total: {$total}).");
+      } else {
+        flash_set('mh_ok',"PHQ-9 tables not installed — data not persisted.");
+      }
+      header("Location: ".url_base().($pid?("?patient_id=".$pid):"")); exit;
+    }
+
+    if ($action === 'safety_save') {
+      if ($pid <= 0) throw new Exception('Select a patient first.');
+      $warning = trim((string)($_POST['warning_signs'] ?? ''));
+      $coping  = trim((string)($_POST['coping_strategies'] ?? ''));
+      $contacts= trim((string)($_POST['contacts'] ?? ''));
+      if ($HAS_SAFETY) {
+        q($mysqli, "INSERT INTO safety_plans (patient_id, warning_signs, coping_strategies, contacts, created_by) VALUES (?,?,?,?,?)",
+          "isssi", [$pid, $warning, $coping, $contacts, $AUTH_ID])->close();
+        audit_log($mysqli, $AUTH_ID, 'create', 'safety_plan', $pid);
+        flash_set('mh_ok',"Safety plan saved.");
+      } else {
+        flash_set('mh_ok',"Safety plan table not installed — data not persisted.");
+      }
+      header("Location: ".url_base().($pid?("?patient_id=".$pid):"")); exit;
+    }
+
+    if ($action === 'export_csv') {
+      if ($pid <= 0) throw new Exception('Select a patient first.');
+      $from = $_POST['from'] ?? ''; $to = $_POST['to'] ?? '';
+      $rangeSql = " AND logged_at >= (NOW() - INTERVAL 60 DAY) ";
+      $types = "i"; $params = [$pid];
+      if ($from !== '' && $to !== '') { $rangeSql = " AND logged_at BETWEEN ? AND ? "; $types="iss"; $params=[$pid,$from,$to]; }
+
+      $stmt = q($mysqli, "SELECT id, mood, note, logged_at FROM mood_logs WHERE patient_id=? {$rangeSql} ORDER BY logged_at ASC", $types, $params);
+      $res = $stmt->get_result();
+
+      header('Content-Type: text/csv');
+      header('Content-Disposition: attachment; filename="mood_logs_'.$pid.'.csv"');
+      $out = fopen('php://output','w');
+      fputcsv($out, ['id','mood','note','logged_at']);
+      while($r = $res->fetch_assoc()){ fputcsv($out, $r); }
+      fclose($out);
+      $stmt->close();
+      exit;
+    }
+  }
+} catch(Throwable $e){
+  flash_set('mh_err', $e->getMessage());
+  header("Location: ".url_base().($patient_id?("?patient_id=".$patient_id):"")); exit;
+}
+
+// ------------------------------ Fetch page data ------------------------------
+$patient_choices = [];
+if ($AUTH_ROLE !== 'patient' && $patient_id === 0) {
+  $rs = $mysqli->query("SELECT p.id, u.name, u.email FROM patients p JOIN users u ON u.id=p.user_id ORDER BY u.name ASC");
+  if($rs){ while($r=$rs->fetch_assoc()){ $patient_choices[]=$r; } $rs->close(); }
+}
+$patient_row = null;
+if ($patient_id > 0) { $patient_row = get_patient_brief($mysqli, $patient_id); }
+
+// date filter
+$from = $_GET['from'] ?? ''; $to = $_GET['to'] ?? '';
+$rangeSql = " AND logged_at >= (NOW() - INTERVAL 60 DAY) ";
+$types = "i"; $params = [$patient_id];
+if ($patient_id > 0 && $from !== '' && $to !== '') {
+  $rangeSql = " AND logged_at BETWEEN ? AND ? "; $types="iss"; $params=[$patient_id,$from,$to];
+}
+
+// Mood logs (for table preview; charts fetched via inline JSON as well)
+$mood_logs = [];
+$agg = ['happy'=>0,'neutral'=>0,'sad'=>0,'anxious'=>0,'angry'=>0];
+if ($patient_id > 0) {
+  $stmt = q($mysqli, "SELECT mood, note, DATE_FORMAT(logged_at, '%Y-%m-%d %H:%i') ts
+                       FROM mood_logs
+                       WHERE patient_id=? {$rangeSql}
+                       ORDER BY logged_at ASC", $types, $params);
+  $res = $stmt->get_result();
+  while($row = $res->fetch_assoc()){
+    $mood_logs[] = $row;
+    if(isset($agg[$row['mood']])) $agg[$row['mood']]++;
+  }
+  $stmt->close();
+}
+
+// Upcoming appointments
+$appts = [];
+if ($patient_id > 0) {
+  $stmt = q($mysqli, "SELECT a.id, a.scheduled_at, a.status, u.name AS doctor_name
+                      FROM appointments a JOIN users u ON a.doctor_id=u.id
+                      WHERE a.patient_id=? AND a.scheduled_at >= NOW()
+                      ORDER BY a.scheduled_at ASC LIMIT 10","i",[$patient_id]);
+  $res = $stmt->get_result();
+  while($row = $res->fetch_assoc()){ $appts[]=$row; }
+  $stmt->close();
+}
+
+// Last PHQ-9
+$last_phq9 = null;
+if ($patient_id > 0 && $HAS_ASSESS) {
+  $stmt = q($mysqli, "SELECT total_score, taken_at FROM mh_assessments WHERE patient_id=? AND type='PHQ-9' ORDER BY taken_at DESC LIMIT 1","i",[$patient_id]);
+  $res = $stmt->get_result(); $last_phq9 = $res->fetch_assoc(); $stmt->close();
+}
+
+// Last Safety Plan
+$last_safety = null;
+if ($patient_id > 0 && $HAS_SAFETY) {
+  $stmt = q($mysqli, "SELECT warning_signs, coping_strategies, contacts, created_at FROM safety_plans WHERE patient_id=? ORDER BY created_at DESC LIMIT 1","i",[$patient_id]);
+  $res = $stmt->get_result(); $last_safety = $res->fetch_assoc(); $stmt->close();
+}
+
+// ------------------------------ UI starts ------------------------------------
+/* If you have shared header/sidebar, uncomment and adjust:
+include 'header.php';  // your site header
+include 'sidebar.php'; // your site sidebar/nav
+*/
 ?>
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Mental Health — RestorativeCare (Demo)</title>
-
-  <!-- Tailwind (CDN quick) -->
-  <script src="https://cdn.tailwindcss.com"></script>
-
-  <!-- Animate.css -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"/>
-
-  <!-- Chart.js -->
+  <meta charset="utf-8"/>
+  <title>Mental Health</title>
+  <!-- No CSS injected here; this will inherit your app’s theme and layout. -->
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-
   <style>
-    /* -------------------------
-       Visual theme & layout
-       ------------------------- */
-    :root{
-      --accent: #06b6d4;
-      --accent-2: #0891b2;
-      --glass: rgba(255,255,255,0.10);
-      --glass-border: rgba(255,255,255,0.16);
-      --muted: #6b7280;
-      --bg: #f5fcff;
-    }
-    html,body{height:100%}
-    body{
-      margin:0;
-      font-family: Inter,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial;
-      background: radial-gradient(circle at 10% 10%, #f5fcff 0%, #ffffff 35%);
-      color:#052026;
-      -webkit-font-smoothing:antialiased;
-      -moz-osx-font-smoothing:grayscale;
-    }
-    /* Glass card */
-    .glass { background: var(--glass); border: 1px solid var(--glass-border); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border-radius:12px; }
-    .card-deep { box-shadow: 0 12px 30px rgba(6,20,28,0.06); transition: transform .18s, box-shadow .18s; }
-    .card-deep:hover { transform: translateY(-6px); box-shadow: 0 26px 48px rgba(6,20,28,0.12); }
-
-    /* Parallax / layers */
-    .parallax { perspective: 1200px; transform-style: preserve-3d; }
-    .layer { transform-origin: center; transition: transform 0.45s cubic-bezier(.2,.9,.3,1); will-change: transform; }
-
-    /* Reveal animations */
-    .reveal { opacity: 0; transform: translateY(18px); transition: all .7s cubic-bezier(.2,.9,.3,1); }
-    .reveal.visible { opacity: 1; transform: translateY(0) }
-
-    /* Heatmap */
-    .heatday { width:28px; height:28px; border-radius:6px; display:inline-block; margin:3px; background:#f3f4f6; cursor:pointer; transition: transform .12s ease, box-shadow .12s ease; }
-    .heatday:hover { transform: translateY(-6px); box-shadow: 0 14px 30px rgba(6,20,28,0.06); }
-    .heat-low { background: #fde68a; }   /* low mood */
-    .heat-med { background: #fca5a5; }   /* medium */
-    .heat-high { background: #86efac; }  /* high mood */
-
-    /* Mood picker */
-    .mood-btn { width:58px; height:58px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; font-size:24px; cursor:pointer; transition: transform .12s ease, box-shadow .12s ease; }
-    .mood-btn:hover { transform: translateY(-6px); box-shadow: 0 14px 30px rgba(6,20,28,0.08); }
-
-    /* Sliders */
-    .slider-thumb { accent-color: var(--accent); }
-
-    /* Orb */
-    .orb { width:220px; height:220px; border-radius:50%; background: radial-gradient(circle at 30% 30%, rgba(6,182,212,0.28), rgba(8,145,178,0.18)); filter: drop-shadow(0 20px 40px rgba(6,182,212,0.08)); display:flex; align-items:center; justify-content:center; }
-
-    /* Layout */
-    @media (min-width:1024px) {
-      .layout-grid { display:grid; grid-template-columns: 1fr 420px; gap:28px; align-items:start; }
-    }
-
-    .muted { color: var(--muted); }
-    .btn-primary { background: linear-gradient(90deg, var(--accent), var(--accent-2)); color: white; }
-    .btn-ghost { background: white; color: var(--accent); border-radius: 10px; border:1px solid rgba(0,0,0,0.04); }
-
-    /* small responsive tweaks */
-    @media (max-width: 640px) {
-      .orb { width:140px; height:140px; }
+    /* Minimal fallbacks only (you can remove if your theme provides these) */
+    .container{max-width:1200px;margin:0 auto;padding:16px;}
+    .row{display:flex;flex-wrap:wrap;gap:16px;}
+    .col{flex:1 1 0;}
+    .col-4{flex:0 0 calc(33.333% - 16px);}
+    .col-6{flex:0 0 calc(50% - 16px);}
+    .col-8{flex:0 0 calc(66.666% - 16px);}
+    .card{border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:16px;background:#fff;}
+    .muted{color:#6b7280;font-size:.92em;}
+    .hstack{display:flex;align-items:center;gap:8px;}
+    .stack{display:flex;flex-direction:column;gap:8px;}
+    .divider{height:1px;background:rgba(0,0,0,.08);margin:8px 0;}
+    .btn{display:inline-block;padding:8px 12px;border-radius:8px;border:1px solid rgba(0,0,0,.1);background:#f9fafb;cursor:pointer;}
+    .btn.primary{background:#06b6d4;color:white;border-color:#06b6d4;}
+    .btn.danger{background:#ef4444;color:white;border-color:#ef4444;}
+    .input, select, textarea{width:100%;padding:10px;border-radius:8px;border:1px solid rgba(0,0,0,.15);}
+    .table{width:100%;border-collapse:collapse;}
+    .table th,.table td{padding:8px;border-bottom:1px solid rgba(0,0,0,.06);text-align:left;}
+    .badge{display:inline-block;padding:2px 8px;border-radius:12px;background:#eef2ff;font-size:.85em;}
+    .alert{border-radius:8px;padding:10px 12px;margin:8px 0;}
+    .alert-success{background:#ecfeff;color:#155e75;border:1px solid #a5f3fc;}
+    .alert-danger{background:#fef2f2;color:#991b1b;border:1px solid #fecaca;}
+    .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin-bottom:12px;}
+    .pill{display:inline-block;padding:4px 10px;border:1px solid rgba(0,0,0,.1);border-radius:999px;background:#fff;cursor:pointer;}
+    .pill.active{background:#06b6d4;color:#fff;border-color:#06b6d4;}
+    details > summary{cursor:pointer;user-select:none;}
+    .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+    .grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;}
+    @media (max-width: 900px){
+      .col-6,.col-8,.col-4{flex: 1 1 100%;}
+      .grid-3{grid-template-columns: 1fr;}
+      .grid-2{grid-template-columns: 1fr;}
     }
   </style>
 </head>
-<body class="p-6">
+<body>
 
-  <!-- NAV -->
-  <header class="flex items-center justify-between mb-6">
-    <div class="flex items-center gap-3">
-      <div class="text-2xl font-bold text-cyan-600">RestorativeCare</div>
-      <div class="text-sm text-gray-500">— Mental Health</div>
+<div class="container">
+  <!-- Page Title / Breadcrumb (inherits your style if present) -->
+  <div class="hstack" style="justify-content:space-between;margin-bottom:8px;">
+    <div class="hstack" style="gap:12px;">
+      <h2 style="margin:0;">Mental Health</h2>
+      <?php if($patient_row): ?>
+        <span class="badge">Patient #<?php echo (int)$patient_id; ?></span>
+        <span class="muted"><?php echo esc($patient_row['name']); ?></span>
+      <?php endif; ?>
     </div>
-    <div class="flex items-center gap-3">
-      <a href="index.php" class="text-sm text-gray-600 hover:text-cyan-600">Home</a>
-      <a href="dashboard.php" class="text-sm text-gray-600 hover:text-cyan-600">Dashboard</a>
-      <a href="mental-health.php" class="px-3 py-2 rounded-lg bg-cyan-500 text-white">Check In</a>
+    <div class="hstack muted">
+      Logged in as <strong>&nbsp;<?php echo esc($AUTH_NAME); ?></strong> (<?php echo esc($AUTH_ROLE); ?>)
     </div>
-  </header>
+  </div>
 
-  <!-- HERO with orb and trend -->
-  <section class="mb-8 relative overflow-hidden">
-    <div class="parallax">
-      <div class="layer reveal" data-depth="0.02">
-        <div class="glass p-6 rounded-xl card-deep grid md:grid-cols-2 gap-6">
+  <!-- Flash messages -->
+  <?php if($e = flash_get('mh_err')): ?>
+    <div class="alert alert-danger">⚠️ <?php echo esc($e); ?></div>
+  <?php endif; ?>
+  <?php if($ok = flash_get('mh_ok')): ?>
+    <div class="alert alert-success">✅ <?php echo esc($ok); ?></div>
+  <?php endif; ?>
+
+  <!-- Staff patient picker (if no patient selected) -->
+  <?php if ($AUTH_ROLE !== 'patient' && $patient_id === 0): ?>
+    <div class="card stack">
+      <h3 style="margin:0;">Select a Patient</h3>
+      <form method="get" class="grid-2">
+        <div>
+          <label class="muted">Choose from list</label>
+          <select class="input" name="patient_id" required>
+            <option value="">-- choose --</option>
+            <?php foreach($patient_choices as $p): ?>
+              <option value="<?php echo (int)$p['id']; ?>">
+                <?php echo esc($p['name']).' ('.esc($p['email']).')'; ?>
+              </option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+        <div class="stack">
+          <label class="muted">Or search</label>
+          <div class="hstack">
+            <input class="input" type="text" id="patientSearch" placeholder="Type name/email..."/>
+            <button type="button" class="btn" id="btnSearch">Search</button>
+          </div>
+          <div id="searchResults" class="muted"></div>
+        </div>
+        <div>
+          <button type="submit" class="btn primary">Open Patient</button>
+        </div>
+      </form>
+      <script>
+        (function(){
+          const i = document.getElementById('patientSearch');
+          const b = document.getElementById('btnSearch');
+          const box = document.getElementById('searchResults');
+          function r(html){ box.innerHTML = html; }
+          async function go(){
+            const q = i.value.trim();
+            if(!q){ r('<div class="muted">Type to search…</div>'); return; }
+            const url = new URL(window.location.href);
+            url.searchParams.set('ajax','patient_search');
+            url.searchParams.set('q', q);
+            const resp = await fetch(url.toString(), {headers:{'Accept':'application/json'}});
+            const data = await resp.json();
+            if(!data.ok){ r('<div class="muted">No results.</div>'); return; }
+            if(!data.rows.length){ r('<div class="muted">No matches.</div>'); return; }
+            let html = '<ul>';
+            for(const p of data.rows){
+              html += `<li><a class="pill" href="?patient_id=${p.id}">${p.name} (${p.email})</a></li>`;
+            }
+            html += '</ul>';
+            r(html);
+          }
+          b.addEventListener('click', go);
+          i.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); go(); } });
+        })();
+      </script>
+    </div>
+    <?php /* Early return visual; rest needs a patient context */ ?>
+  <?php else: ?>
+
+  <!-- Patient header card -->
+  <?php if($patient_row): ?>
+    <div class="card">
+      <div class="grid-3">
+        <div>
+          <div class="muted">Name</div>
+          <div><strong><?php echo esc($patient_row['name']); ?></strong></div>
+        </div>
+        <div>
+          <div class="muted">Contact</div>
+          <div><?php echo esc($patient_row['email']); ?> · <?php echo esc($patient_row['phone']); ?></div>
+        </div>
+        <div>
+          <div class="muted">Demographics</div>
+          <div>DOB: <?php echo esc($patient_row['dob']); ?> · Gender: <?php echo esc($patient_row['gender']); ?></div>
+        </div>
+      </div>
+      <?php if(!empty($patient_row['address'])): ?>
+        <div class="divider"></div>
+        <div class="muted">Address</div>
+        <div><?php echo esc($patient_row['address']); ?></div>
+      <?php endif; ?>
+    </div>
+  <?php endif; ?>
+
+  <!-- Toolbar: filters + export -->
+  <div class="toolbar">
+    <form method="get" class="hstack" style="gap:8px;">
+      <?php if($AUTH_ROLE!=='patient'): ?>
+        <input type="hidden" name="patient_id" value="<?php echo (int)$patient_id; ?>"/>
+      <?php endif; ?>
+      <div class="hstack" style="gap:4px;">
+        <span class="muted">From</span>
+        <input class="input" type="datetime-local" name="from" value="<?php echo esc($from); ?>"/>
+      </div>
+      <div class="hstack" style="gap:4px;">
+        <span class="muted">To</span>
+        <input class="input" type="datetime-local" name="to" value="<?php echo esc($to); ?>"/>
+      </div>
+      <button class="btn">Apply</button>
+      <a class="btn" href="<?php echo esc(url_base().($AUTH_ROLE!=='patient'?'?patient_id='.$patient_id:'')); ?>">Reset</a>
+    </form>
+
+    <form method="post" class="hstack" style="gap:8px;">
+      <input type="hidden" name="_csrf" value="<?php echo esc(csrf_token()); ?>"/>
+      <input type="hidden" name="action" value="export_csv"/>
+      <?php if($AUTH_ROLE!=='patient'): ?>
+        <input type="hidden" name="patient_id" value="<?php echo (int)$patient_id; ?>"/>
+      <?php endif; ?>
+      <input class="input" type="hidden" name="from" value="<?php echo esc($from); ?>"/>
+      <input class="input" type="hidden" name="to" value="<?php echo esc($to); ?>"/>
+      <button class="btn">Export CSV</button>
+    </form>
+  </div>
+
+  <!-- Main grid -->
+  <div class="row">
+
+    <!-- Left column -->
+    <div class="col col-6">
+      <!-- Mood Logger -->
+      <div class="card stack">
+        <div class="hstack" style="justify-content:space-between;">
+          <h3 style="margin:0;">Log Mood</h3>
+          <div class="muted">Rate limit: 1 entry / 5 min</div>
+        </div>
+        <form method="post" class="grid-2" style="align-items:flex-end;">
+          <input type="hidden" name="_csrf" value="<?php echo esc(csrf_token()); ?>"/>
+          <input type="hidden" name="action" value="mood_create"/>
+          <?php if($AUTH_ROLE!=='patient'): ?>
+            <input type="hidden" name="patient_id" value="<?php echo (int)$patient_id; ?>"/>
+          <?php endif; ?>
           <div>
-            <h1 class="text-3xl md:text-4xl font-extrabold">Mental Well-being Check-in</h1>
-            <p class="text-gray-600 mt-2">Daily check-ins help detect trends early. Log mood, stress, sleep and get coping suggestions.</p>
+            <label class="muted">Mood</label>
+            <select class="input" name="mood" required>
+              <option value="happy">😊 Happy</option>
+              <option value="neutral">😐 Neutral</option>
+              <option value="sad">😔 Sad</option>
+              <option value="anxious">😟 Anxious</option>
+              <option value="angry">😠 Angry</option>
+            </select>
+          </div>
+          <div>
+            <label class="muted">Note (optional)</label>
+            <input class="input" type="text" name="note" placeholder="Add a short note for the care team"/>
+          </div>
+          <div>
+            <button class="btn primary" type="submit">Save</button>
+          </div>
+        </form>
+      </div>
 
-            <div class="mt-6 flex items-center gap-4">
-              <div class="orb" id="orb3d" title="Mood orb (visual)">
-                <div id="orbText" class="text-white font-bold text-xl">😊</div>
-              </div>
+      <!-- Mood Distribution -->
+      <div class="card">
+        <div class="hstack" style="justify-content:space-between;">
+          <h3 style="margin:0;">Mood Distribution</h3>
+          <span class="muted">last 60 days (or filter)</span>
+        </div>
+        <div style="height:260px;">
+          <canvas id="moodPie"></canvas>
+        </div>
+      </div>
 
+      <!-- Appointments -->
+      <div class="card">
+        <h3 style="margin-top:0;">Upcoming Appointments</h3>
+        <?php if($appts): ?>
+          <table class="table">
+            <thead><tr><th>When</th><th>With</th><th>Status</th></tr></thead>
+            <tbody>
+              <?php foreach($appts as $a): ?>
+                <tr>
+                  <td><?php echo esc(date('M d, Y H:i', strtotime($a['scheduled_at']))); ?></td>
+                  <td>Dr. <?php echo esc($a['doctor_name']); ?></td>
+                  <td><span class="badge"><?php echo esc($a['status']); ?></span></td>
+                </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        <?php else: ?>
+          <div class="muted">No upcoming appointments.</div>
+        <?php endif; ?>
+      </div>
+    </div>
+
+    <!-- Right column -->
+    <div class="col col-6">
+
+      <!-- Mood Trend -->
+      <div class="card">
+        <div class="hstack" style="justify-content:space-between;">
+          <h3 style="margin:0;">Mood Trend</h3>
+          <span class="muted">Score: 😊=+2 · 😐=+1 · 😔/😟=-1 · 😠=-2</span>
+        </div>
+        <div style="height:260px;">
+          <canvas id="moodLine"></canvas>
+        </div>
+        <details style="margin-top:10px;">
+          <summary class="muted">Show recent entries</summary>
+          <div class="table-responsive" style="margin-top:.5rem;">
+            <table class="table">
+              <thead><tr><th>When</th><th>Mood</th><th>Note</th></tr></thead>
+              <tbody>
+              <?php if($mood_logs): foreach(array_reverse($mood_logs) as $r): ?>
+                <tr>
+                  <td class="muted"><?php echo esc($r['ts']); ?></td>
+                  <td><?php echo esc(ucfirst($r['mood'])); ?></td>
+                  <td><?php echo esc($r['note']); ?></td>
+                </tr>
+              <?php endforeach; else: ?>
+                <tr><td colspan="3" class="muted">No mood entries yet.</td></tr>
+              <?php endif; ?>
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+
+      <!-- PHQ-9 -->
+      <div class="card">
+        <div class="hstack" style="justify-content:space-between;">
+          <h3 style="margin:0;">PHQ-9 Assessment</h3>
+          <?php if($last_phq9): ?>
+            <span class="muted">Last: <strong><?php echo (int)$last_phq9['total_score']; ?></strong> · <?php echo esc(date('M d, Y H:i', strtotime($last_phq9['taken_at']))); ?></span>
+          <?php else: ?>
+            <span class="muted">No previous scores</span>
+          <?php endif; ?>
+        </div>
+        <form method="post" class="stack" style="margin-top:8px;">
+          <input type="hidden" name="_csrf" value="<?php echo esc(csrf_token()); ?>"/>
+          <input type="hidden" name="action" value="phq9_save"/>
+          <?php if($AUTH_ROLE!=='patient'): ?>
+            <input type="hidden" name="patient_id" value="<?php echo (int)$patient_id; ?>"/>
+          <?php endif; ?>
+          <div class="muted">Over the last 2 weeks, how often… (0=Not at all, 1=Several days, 2=More than half the days, 3=Nearly every day)</div>
+          <?php
+            $phq = [
+              1=>"Little interest or pleasure in doing things",
+              2=>"Feeling down, depressed, or hopeless",
+              3=>"Trouble falling or staying asleep, or sleeping too much",
+              4=>"Feeling tired or having little energy",
+              5=>"Poor appetite or overeating",
+              6=>"Feeling bad about yourself — or that you are a failure or have let yourself or your family down",
+              7=>"Trouble concentrating on things, such as reading the newspaper or watching television",
+              8=>"Moving or speaking so slowly that other people could have noticed? Or the opposite — being so fidgety or restless that you have been moving around a lot more than usual",
+              9=>"Thoughts that you would be better off dead, or thoughts of hurting yourself",
+            ];
+            for($i=1;$i<=9;$i++):
+          ?>
+          <div class="grid-2">
+            <label><strong><?php echo $i; ?>.</strong> <?php echo esc($phq[$i]); ?></label>
+            <select name="phq9_<?php echo $i; ?>" class="input">
+              <option value="0">0</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+            </select>
+          </div>
+          <?php endfor; ?>
+          <div class="hstack" style="justify-content:flex-end;">
+            <button class="btn primary">Save PHQ-9</button>
+          </div>
+          <?php if(!$HAS_ASSESS): ?>
+            <div class="muted">Storage tables for PHQ-9 are not installed. Run your MH migration to persist assessments.</div>
+          <?php endif; ?>
+          <div class="muted"><strong>Clinical note:</strong> If item 9 &gt; 0, follow crisis protocol immediately.</div>
+        </form>
+      </div>
+
+      <!-- Safety Plan -->
+      <div class="card">
+        <div class="hstack" style="justify-content:space-between;">
+          <h3 style="margin:0;">Safety Plan</h3>
+          <?php if($last_safety): ?>
+            <span class="muted">Last updated <?php echo esc(date('M d, Y H:i', strtotime($last_safety['created_at']))); ?></span>
+          <?php else: ?>
+            <span class="muted">No plan on file</span>
+          <?php endif; ?>
+        </div>
+
+        <?php if($last_safety): ?>
+          <details open>
+            <summary class="muted">Show current plan</summary>
+            <div class="stack" style="margin-top:8px;">
               <div>
-                <div class="text-sm muted">Patient</div>
-                <div class="font-semibold"><?php echo htmlspecialchars($patientName); ?></div>
-                <div class="text-sm muted mt-2">Today</div>
-                <div id="todayMood" class="text-2xl font-semibold mt-1">😊 Happy</div>
-                <div class="text-sm muted mt-1">Quick take: <span id="quickTake">Positive</span></div>
+                <div class="muted">Warning signs</div>
+                <div><?php echo nl2br(esc($last_safety['warning_signs'])); ?></div>
+              </div>
+              <div>
+                <div class="muted">Coping strategies</div>
+                <div><?php echo nl2br(esc($last_safety['coping_strategies'])); ?></div>
+              </div>
+              <div>
+                <div class="muted">Contacts</div>
+                <div><?php echo nl2br(esc($last_safety['contacts'])); ?></div>
               </div>
             </div>
+          </details>
+          <div class="divider"></div>
+        <?php endif; ?>
+
+        <form method="post" class="stack">
+          <input type="hidden" name="_csrf" value="<?php echo esc(csrf_token()); ?>"/>
+          <input type="hidden" name="action" value="safety_save"/>
+          <?php if($AUTH_ROLE!=='patient'): ?>
+            <input type="hidden" name="patient_id" value="<?php echo (int)$patient_id; ?>"/>
+          <?php endif; ?>
+          <div>
+            <label class="muted">Warning signs</label>
+            <textarea class="input" name="warning_signs" rows="3" placeholder="Thoughts, images, moods, situations, behavior..."><?php echo $last_safety? esc($last_safety['warning_signs']):''; ?></textarea>
           </div>
-
-          <div class="flex flex-col justify-center">
-            <div class="text-sm muted">Recent trend</div>
-            <canvas id="trendChart" height="160" class="mt-3"></canvas>
-            <div class="text-xs muted mt-2">Mood over the last 14 days — higher is better.</div>
+          <div>
+            <label class="muted">Coping strategies</label>
+            <textarea class="input" name="coping_strategies" rows="3" placeholder="Things I can do to take my mind off problems..."><?php echo $last_safety? esc($last_safety['coping_strategies']):''; ?></textarea>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- decorative glow -->
-    <div style="position:absolute; right:-80px; top:-120px; width:420px; height:420px; background: radial-gradient(circle at 30% 30%, rgba(6,182,212,0.12), transparent); border-radius:50%; filter: blur(40px); transform: rotate(10deg);"></div>
-  </section>
-
-  <!-- MAIN GRID -->
-  <main class="layout-grid">
-    <!-- LEFT: check-in & history -->
-    <section class="glass rounded-xl p-6 card-deep reveal layer" data-depth="0.02">
-
-      <div class="flex items-start justify-between">
-        <div>
-          <h2 class="text-xl font-semibold">Daily Check-in</h2>
-          <p class="text-sm muted mt-1">Static demo data. Use controls to interact visually (no data saved).</p>
-        </div>
-        <div class="text-sm muted">Session demo</div>
-      </div>
-
-      <!-- Mood picker -->
-      <div class="mt-6">
-        <div class="text-sm muted mb-2">How do you feel right now?</div>
-        <div class="flex gap-3">
-          <button class="mood-btn glass" onclick="uiPickMood(5)" title="Very happy">😄</button>
-          <button class="mood-btn glass" onclick="uiPickMood(4)" title="Happy">🙂</button>
-          <button class="mood-btn glass" onclick="uiPickMood(3)" title="Neutral">😐</button>
-          <button class="mood-btn glass" onclick="uiPickMood(2)" title="Sad">☹️</button>
-          <button class="mood-btn glass" onclick="uiPickMood(1)" title="Very sad">😭</button>
-        </div>
-      </div>
-
-      <!-- sliders -->
-      <div class="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div class="glass p-4 rounded-lg">
-          <div class="text-sm muted">Stress</div>
-          <input id="stress" type="range" min="0" max="10" value="4" class="w-full slider-thumb" oninput="document.getElementById('stressVal').innerText=this.value" />
-          <div class="text-sm mt-2">Level: <span id="stressVal">4</span>/10</div>
-        </div>
-        <div class="glass p-4 rounded-lg">
-          <div class="text-sm muted">Energy</div>
-          <input id="energy" type="range" min="0" max="10" value="7" class="w-full slider-thumb" oninput="document.getElementById('energyVal').innerText=this.value" />
-          <div class="text-sm mt-2">Level: <span id="energyVal">7</span>/10</div>
-        </div>
-        <div class="glass p-4 rounded-lg">
-          <div class="text-sm muted">Sleep (hours)</div>
-          <input id="sleep" type="number" min="0" max="24" value="7" class="w-full p-2 rounded-md border border-white/10 bg-white/5" onchange="updateSleepQuality()" />
-          <div class="text-sm mt-2">Quality: <span id="sleepQuality">Good</span></div>
-        </div>
-      </div>
-
-      <!-- quick journal -->
-      <div class="mt-6">
-        <label class="text-sm muted">Short journal (optional)</label>
-        <textarea id="journal" rows="4" class="w-full mt-2 p-3 rounded-lg border border-white/10 bg-white/5" placeholder="How was your day? Any triggers or wins?"></textarea>
-        <div class="flex items-center justify-between mt-3">
-          <div class="text-xs muted">This demo analyzes sentiment with simple rules.</div>
-          <div class="flex gap-2">
-            <button id="suggestBtn" class="px-3 py-2 rounded-lg btn-ghost" onclick="fillSuggestion()">Suggest text</button>
-            <button id="saveBtn" class="px-4 py-2 rounded-lg btn-primary" onclick="demoSave()">Save (demo)</button>
+          <div>
+            <label class="muted">Contacts</label>
+            <textarea class="input" name="contacts" rows="3" placeholder="Family, friends, clinicians, hotlines..."><?php echo $last_safety? esc($last_safety['contacts']):''; ?></textarea>
           </div>
-        </div>
-      </div>
-
-      <!-- analytics: heatmap & suggestions -->
-      <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div class="glass p-4 rounded-lg">
-          <div class="text-sm muted">Mood calendar (14 days)</div>
-          <div id="heatmap" class="mt-3"></div>
-        </div>
-        <div class="glass p-4 rounded-lg">
-          <div class="text-sm muted">AI suggestions</div>
-          <div id="suggestions" class="mt-3 space-y-2 text-sm">
-            <!-- static initial suggestions -->
+          <div class="hstack" style="justify-content:flex-end;">
+            <button class="btn primary">Save Safety Plan</button>
           </div>
-        </div>
+          <?php if(!$HAS_SAFETY): ?>
+            <div class="muted">Safety plan table not installed. Run your MH migration to persist plans.</div>
+          <?php endif; ?>
+          <div class="muted"><strong>Crisis:</strong> If in immediate danger, call local emergency services now.</div>
+        </form>
       </div>
 
-      <!-- recent check-ins list -->
-      <div class="mt-6">
-        <h3 class="text-sm font-semibold">Recent Check-ins</h3>
-        <div id="history" class="mt-3 space-y-2 text-sm muted"></div>
-      </div>
-    </section>
+    </div><!-- /Right column -->
 
-    <!-- RIGHT: insights, mini charts, breathing -->
-    <aside class="space-y-6">
-      <div class="glass p-4 rounded-xl card-deep reveal layer" data-depth="0.06">
-        <h4 class="font-semibold">Mood Trend</h4>
-        <canvas id="miniTrend" height="140" class="mt-3"></canvas>
-        <div class="text-xs muted mt-2">7-day mood (static demo)</div>
-      </div>
+  </div><!-- /row -->
 
-      <div class="glass p-4 rounded-xl card-deep reveal layer" data-depth="0.09">
-        <h4 class="font-semibold">Stress Gauge</h4>
-        <div class="mt-3 flex items-center gap-3">
-          <div style="flex:1">
-            <div class="h-3 w-full bg-white/8 rounded-full overflow-hidden"><div id="stressBar" style="width:40%" class="h-3 bg-gradient-to-r from-yellow-400 to-red-400"></div></div>
-            <div class="text-xs muted mt-2">Current: <span id="stressBig">4</span>/10</div>
-          </div>
-          <div class="text-lg font-semibold">4</div>
-        </div>
-      </div>
+  <?php endif; // end staff picker vs patient view ?>
+</div><!-- /container -->
 
-      <div class="glass p-4 rounded-xl card-deep reveal layer" data-depth="0.03">
-        <h4 class="font-semibold">Mindful Break</h4>
-        <p class="text-sm muted mt-2">Try a quick guided breathing exercise — 30s demo.</p>
-        <button id="startBreath" class="mt-3 px-4 py-2 rounded-lg btn-primary">Start</button>
-      </div>
-    </aside>
-  </main>
-
-  <footer class="mt-8 text-center text-xs text-gray-500">&copy; <?php echo date('Y'); ?> RestorativeCare — Mental Health (Demo)</footer>
-
-  <!-- FULL JAVASCRIPT (static data + UI) -->
-  <script>
-  /****************************************************************
-   * Static demo mental-health UI script
-   * - No localStorage / no DB
-   * - All data hardcoded below so page displays immediately
-   ****************************************************************/
-
-  // --------- Static demo arrays (14 days) ----------
-  const demoLabels = ["Day 1","Day 2","Day 3","Day 4","Day 5","Day 6","Day 7",
-                      "Day 8","Day 9","Day 10","Day 11","Day 12","Day 13","Day 14"];
-  // mood scale 1..5 (1 low, 5 high)
-  const demoMood =    [5,4,4,3,5,4,5,4,4,3,4,5,5,4];
-  // stress 0..10
-  const demoStress =  [3,4,5,4,3,4,3,4,5,4,3,4,3,4];
-  const demoEnergy =  [7,6,6,5,7,6,7,6,7,6,6,7,7,6];
-  const demoSleep =   [7,6,8,6,7,7,8,6,7,6,7,8,7,7];
-
-  // ---------- DOM elements ----------
-  const orbText = document.getElementById('orbText');
-  const todayMoodEl = document.getElementById('todayMood');
-  const quickTakeEl = document.getElementById('quickTake');
-  const heatmapEl = document.getElementById('heatmap');
-  const suggestionsEl = document.getElementById('suggestions');
-  const historyEl = document.getElementById('history');
-  const stressBar = document.getElementById('stressBar');
-  const stressBig = document.getElementById('stressBig');
-
-  // initial static "today" values (choose last day of arrays)
-  const todayIndex = demoMood.length - 1;
-  const today = {
-    mood: demoMood[todayIndex],
-    stress: demoStress[todayIndex],
-    energy: demoEnergy[todayIndex],
-    sleep: demoSleep[todayIndex],
-    journal: "Had a good physiotherapy session, feeling hopeful."
-  };
-
-  // helper: mood label / emoji
-  function moodEmoji(m){
-    if (m>=5) return '😁';
-    if (m==4) return '🙂';
-    if (m==3) return '😐';
-    if (m==2) return '☹️';
-    return '😢';
-  }
-  function moodLabel(m){
-    if (m>=5) return 'Very good';
-    if (m==4) return 'Good';
-    if (m==3) return 'Okay';
-    if (m==2) return 'Low';
-    return 'Very low';
-  }
-
-  // ---------- Render initial "today" UI ----------
-  function renderToday(){
-    orbText.innerText = moodEmoji(today.mood);
-    todayMoodEl.innerText = moodLabel(today.mood);
-    quickTakeEl.innerText = (today.journal ? simpleSentimentPreview(today.journal) : 'No journal');
-    stressBar.style.width = Math.min(100, Math.round((today.stress/10)*100)) + '%';
-    stressBig.innerText = today.stress;
-  }
-
-  // ---------- Build charts (Chart.js) ----------
-  // Trend chart (14 days)
-  const trendCtx = document.getElementById('trendChart').getContext('2d');
-  const trendChart = new Chart(trendCtx, {
-    type: 'line',
-    data: {
-      labels: demoLabels,
-      datasets: [{
-        label: 'Mood',
-        data: demoMood,
-        borderColor: '#06b6d4',
-        backgroundColor: 'rgba(6,182,212,0.12)',
-        tension: 0.36,
-        fill: true,
-        pointRadius: 4
-      }]
-    },
-    options: {
-      plugins: { legend: { display: false } },
-      scales: {
-        y: { min: 0, max: 6, ticks: { stepSize: 1 } },
-        x: { display: false }
-      }
+<!-- Charts + small UX scripts -->
+<script>
+(function(){
+  // Helper to build URL with params (for AJAX)
+  function buildUrl(params){
+    const url = new URL(window.location.href);
+    for(const k in params){
+      if(params[k]===null) url.searchParams.delete(k);
+      else url.searchParams.set(k, params[k]);
     }
-  });
+    return url.toString();
+  }
 
-  // Mini 7-day bar
-  const miniCtx = document.getElementById('miniTrend').getContext('2d');
-  const miniChart = new Chart(miniCtx, {
-    type: 'bar',
-    data: {
-      labels: demoLabels.slice(-7),
-      datasets: [{ data: demoMood.slice(-7), backgroundColor: '#06b6d4' }]
-    },
-    options: { plugins: { legend: { display: false } }, scales: { y: { display: false }, x: { display: false } } }
-  });
+  // Mood score mapping for trend line
+  function moodScore(m){
+    if(m==='happy') return 2;
+    if(m==='neutral') return 1;
+    if(m==='sad' || m==='anxious') return -1;
+    if(m==='angry') return -2;
+    return 0;
+  }
 
-  // ---------- Heatmap (static) ----------
-  function buildHeatmap(){
-    heatmapEl.innerHTML = '';
-    for (let i=0;i<demoMood.length;i++){
-      const m = demoMood[i];
-      const node = document.createElement('div');
-      node.className = 'heatday ' + (m>=4 ? 'heat-high' : (m==3 ? 'heat-med' : 'heat-low'));
-      node.title = `${demoLabels[i]} — Mood ${m} • Stress ${demoStress[i]}`;
-      node.addEventListener('click', ()=> {
-        alert(`${demoLabels[i]}\nMood: ${m}\nStress: ${demoStress[i]}\nEnergy: ${demoEnergy[i]}\nSleep: ${demoSleep[i]}h`);
+  // Chart elements (if present on this view)
+  const lineEl = document.getElementById('moodLine');
+  const pieEl  = document.getElementById('moodPie');
+
+  // Patient context (if no patient selected, skip)
+  const phpPatientId = <?php echo (int)$patient_id; ?>;
+  if(!phpPatientId){ return; }
+
+  // Fetch logs for line chart
+  async function fetchLogs(){
+    const url = new URL(window.location.href);
+    url.searchParams.set('ajax','mood_logs');
+    url.searchParams.set('patient_id', phpPatientId);
+    <?php if($from): ?> url.searchParams.set('from', '<?php echo esc($from); ?>'); <?php endif; ?>
+    <?php if($to): ?>   url.searchParams.set('to', '<?php echo esc($to); ?>');   <?php endif; ?>
+    const resp = await fetch(url.toString(), {headers:{'Accept':'application/json'}});
+    return await resp.json();
+  }
+
+  // Fetch aggregate for pie chart
+  async function fetchAgg(){
+    const url = new URL(window.location.href);
+    url.searchParams.set('ajax','mood_agg');
+    url.searchParams.set('patient_id', phpPatientId);
+    <?php if($from): ?> url.searchParams.set('from', '<?php echo esc($from); ?>'); <?php endif; ?>
+    <?php if($to): ?>   url.searchParams.set('to', '<?php echo esc($to); ?>');   <?php endif; ?>
+    const resp = await fetch(url.toString(), {headers:{'Accept':'application/json'}});
+    return await resp.json();
+  }
+
+  // Render Line Chart
+  (async function(){
+    if(!lineEl || typeof Chart==='undefined') return;
+    try{
+      const data = await fetchLogs();
+      if(!data.ok) return;
+      const labels = data.rows.map(r=>r.logged_at);
+      const series = data.rows.map(r=>moodScore(r.mood));
+      new Chart(lineEl.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{ label:'Mood score', data: series, tension: .3, pointRadius: 2 }]
+        },
+        options: { responsive:true, scales:{ y:{ suggestedMin:-2, suggestedMax:2 } } }
       });
-      heatmapEl.appendChild(node);
-    }
-  }
-
-  // ---------- Suggestions logic (mocked) ----------
-  function simpleSentimentScore(text){
-    if (!text) return 0;
-    const t = text.toLowerCase();
-    const pos = ['good','great','happy','better','improved','grateful','hopeful','relieved','ok','okay','fine','productive','peace','good'];
-    const neg = ['sad','depressed','anxious','anxiety','angry','hate','worse','terrible','lonely','tired','pain','scared','fear'];
-    let s = 0;
-    pos.forEach(w=> { if (t.indexOf(w) !== -1) s++; });
-    neg.forEach(w=> { if (t.indexOf(w) !== -1) s--; });
-    return s;
-  }
-  function simpleSentimentPreview(text){
-    const sc = simpleSentimentScore(text);
-    if (sc > 0) return 'Positive';
-    if (sc === 0) return 'Neutral';
-    return 'Negative';
-  }
-
-  function generateStaticSuggestions(){
-    // use today's mood/stress and sentiment to pick suggestions
-    const list = [];
-    if (today.mood <= 2 || today.stress >= 8) {
-      list.push('Contact counselor / helpline — consider booking an urgent check-in.');
-      list.push('Try 3 minutes of paced breathing (4s in, 6s out).');
-      list.push('If severe, visit nearest ER or call emergency services.');
-    } else {
-      if (simpleSentimentScore(today.journal) < 0) list.push('Write a gratitude list: 3 things you’re thankful for today.');
-      list.push('Take a 10–15 minute walk in sunlight — mood booster.');
-      list.push('Try a short guided meditation (5 minutes).');
-    }
-    return list;
-  }
-
-  // ---------- History list (static) ----------
-  function buildHistory(){
-    historyEl.innerHTML = '';
-    for (let i=demoMood.length-1;i>=Math.max(0,demoMood.length-7);i--){
-      const d = demoLabels[i];
-      const m = demoMood[i];
-      const st = demoStress[i];
-      const node = document.createElement('div');
-      node.className = 'flex items-center justify-between p-2 glass rounded-md';
-      node.innerHTML = `<div><div class="font-semibold">${d}</div><div class="text-xs muted">Mood ${m} • Stress ${st} • Sleep ${demoSleep[i]}h</div></div><div class="text-xl">${moodEmoji(m)}</div>`;
-      historyEl.appendChild(node);
-    }
-  }
-
-  // ---------- UI pick mood (visual only) ----------
-  function uiPickMood(m){
-    // update orb + today label + quick take
-    orbText.innerText = moodEmoji(m);
-    todayMoodEl.innerText = moodLabel(m);
-    quickTakeEl.innerText = (m >=4 ? 'Positive' : (m==3 ? 'Neutral' : 'Needs attention'));
-    // small pulse animation
-    const el = document.getElementById('orb3d');
-    el.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.06)' }, { transform: 'scale(1)' }], { duration: 420 });
-  }
-
-  // ---------- Demo save (visual feedback only) ----------
-  function demoSave(){
-    const j = document.getElementById('journal').value;
-    const s = document.getElementById('stress').value;
-    const e = document.getElementById('energy').value;
-    const sl = document.getElementById('sleep').value;
-    // update "today" preview visually only
-    today.journal = j || today.journal;
-    today.stress = parseInt(s);
-    today.energy = parseInt(e);
-    today.sleep = parseInt(sl);
-    renderToday();
-    // show suggestions based on current values
-    const sug = generateStaticSuggestions();
-    suggestionsEl.innerHTML = sug.map(x=> `<div class="glass p-2 rounded-md">${x}</div>`).join('');
-    // feedback
-    const btn = document.getElementById('saveBtn');
-    btn.innerText = 'Saved';
-    setTimeout(()=> btn.innerText = 'Save (demo)', 900);
-  }
-
-  // suggestion filler quick text
-  function fillSuggestion(){
-    document.getElementById('journal').value = 'Today I felt better after a short walk and chatting with a friend.';
-  }
-
-  // ---------- Breathing exercise (demo) ----------
-  document.getElementById('startBreath').addEventListener('click', ()=> {
-    const btn = document.getElementById('startBreath');
-    btn.disabled = true;
-    let t = 30;
-    const orig = btn.innerText;
-    btn.innerText = `Breathing... ${t}s`;
-    const iv = setInterval(()=> {
-      t--;
-      btn.innerText = `Breathing... ${t}s`;
-      if (t <= 0) { clearInterval(iv); btn.disabled = false; btn.innerText = orig; alert('Breathing exercise finished (demo).'); }
-    }, 1000);
-  });
-
-  // ---------- Support functions ----------
-  function updateSleepQuality(){
-    const val = parseInt(document.getElementById('sleep').value || 0);
-    const el = document.getElementById('sleepQuality');
-    el.innerText = (val >= 7 ? 'Good' : (val >=5 ? 'Okay' : 'Poor'));
-  }
-
-  // ---------- Parallax mouse subtle movement ----------
-  document.querySelectorAll('.layer').forEach(node => node.style.willChange = 'transform');
-  window.addEventListener('mousemove', (e)=>{
-    const cx = window.innerWidth/2, cy = window.innerHeight/2;
-    const dx = (e.clientX - cx)/cx, dy = (e.clientY - cy)/cy;
-    document.querySelectorAll('.layer').forEach(el=>{
-      const depth = parseFloat(el.dataset.depth || 0.02);
-      el.style.transform = `translate3d(${dx * depth * -40}px, ${dy * depth * -24}px, 0) rotateX(${dy * depth * 6}deg) rotateY(${dx * depth * 10}deg)`;
-    });
-  });
-
-  // ---------- Scroll reveal (IntersectionObserver) ----------
-  const reveals = document.querySelectorAll('.reveal');
-  const io = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        entry.target.classList.add('visible','animate__animated','animate__fadeInUp');
-      }
-    });
-  }, { threshold: 0.12 });
-  reveals.forEach(r => io.observe(r));
-
-  // ---------- Initial render ----------
-  (function init(){
-    renderToday();
-    buildHeatmap();
-    buildHistory();
-    // initial suggestions
-    const sug = generateStaticSuggestions();
-    suggestionsEl.innerHTML = sug.map(x=> `<div class="glass p-2 rounded-md">${x}</div>`).join('');
-    // initial trend & mini charts already rendered
+    } catch(e){ /* ignore */ }
   })();
 
-  // ---------- chart responsiveness ----------
-  window.addEventListener('resize', ()=> { trendChart.resize(); miniChart.resize(); });
+  // Render Pie Chart
+  (async function(){
+    if(!pieEl || typeof Chart==='undefined') return;
+    try{
+      const data = await fetchAgg();
+      if(!data.ok) return;
+      const agg = data.agg || {};
+      const labels = Object.keys(agg).map(k=>k.charAt(0).toUpperCase()+k.slice(1));
+      const values = Object.keys(agg).map(k=>agg[k]);
+      new Chart(pieEl.getContext('2d'), {
+        type: 'doughnut',
+        data: { labels: labels, datasets: [{ data: values }] },
+        options: { responsive:true }
+      });
+    } catch(e){ /* ignore */ }
+  })();
 
-  </script>
+})();
+</script>
+
+<?php
+/* If your app has shared footer include, you can uncomment:
+include 'footer.php';
+*/
+?>
 </body>
 </html>

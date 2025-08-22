@@ -1,10 +1,320 @@
 <?php
-// dashboard.php
-// requires auth.php in the same folder (session + require_auth())
-// require_once __DIR__ . '/auth.php';
-// require_auth();
-$user = $_SESSION['user'] ?? ['name' => 'Jaimin Parmar'];
-$userName = htmlspecialchars($user['name']);
+// dashboard.php — FULL FILE WITH DB + SESSION INTEGRATION (keeps your UI intact)
+
+/* ----------------------------- Session & Helpers ----------------------------- */
+if (session_status() === PHP_SESSION_NONE) {
+  session_start();
+}
+function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+
+/* ----------------------------- DB Connection -------------------------------- */
+$DB_HOST = 'localhost';
+$DB_PORT = '3307';
+$DB_USER = 'root';
+$DB_PASS = "";
+$DB_NAME = 'restorativecare';
+
+$mysqli = mysqli_connect($DB_HOST, $DB_USER, $DB_PASS,$DB_NAME,$DB_PORT);
+if ($mysqli->connect_errno) {
+  http_response_code(500);
+  die("Database connection failed: " . esc($mysqli->connect_error));
+}
+$mysqli->set_charset('utf8mb4');
+
+/* ----------------------------- Resolve Current User -------------------------- */
+/*
+  We don’t implement login here (as requested). If a session user exists, we use it.
+  Otherwise we gracefully pick the first patient as a demo user, or fallback to a temp guest.
+  Structure expected in $_SESSION['user']: ['id'=>int,'name'=>string,'role'=>'patient'|'doctor'|'admin']
+*/
+$currentUser = $_SESSION['user'] ?? null;
+
+if (!$currentUser) {
+  // Try to find any patient user to act as the dashboard user
+  $demoRes = $mysqli->query("SELECT u.id, u.name, u.email, u.role
+                               FROM users u
+                               WHERE u.role = 'patient'
+                               ORDER BY u.id ASC
+                               LIMIT 1");
+  if ($demoRes && $demoRes->num_rows) {
+    $currentUser = $demoRes->fetch_assoc();
+  } else {
+    // Still let the page render with placeholders if no users exist yet
+    $currentUser = ['id' => 0, 'name' => 'Jaimin Parmar', 'role' => 'patient'];
+  }
+}
+
+$userId   = (int)($currentUser['id'] ?? 0);
+$userName = $currentUser['name'] ?? 'Jaimin Parmar';
+$userRole = $currentUser['role'] ?? 'patient';
+
+/* ----------------------------- Link to Patient Row --------------------------- */
+$patientId = null;
+if ($userId > 0) {
+  $stmt = $mysqli->prepare("SELECT p.id FROM patients p WHERE p.user_id = ? LIMIT 1");
+  $stmt->bind_param('i', $userId);
+  $stmt->execute();
+  $stmt->bind_result($pid);
+  if ($stmt->fetch()) {
+    $patientId = (int)$pid;
+  }
+  $stmt->close();
+}
+
+/* ----------------------------- Data Defaults -------------------------------- */
+$adherenceTaken = 0;     // last 7 days taken doses (logs)
+$adherenceMissed = 0;    // computed against a simple expectation (2/day over 7 days)
+$adherencePct = 0;       // derived
+
+$dischargeReadiness = 0; // % (we’ll map from treatment progress)
+
+$therapySessionsWeek = 0;
+$exercisesDone = 0;      // demo metric: we’ll map to number of medication logs capped to 10
+$hydrationLabel = 'Good';// simple label based on adherence
+
+$moodSeries = [3,4,3,4,5,4,4]; // default sparkline (Mon..Sun)
+
+$appointments = [];       // upcoming 2
+$notifications = [];      // latest 2
+
+/* ----------------------------- Compute Adherence ----------------------------- */
+/*
+  Heuristic (demo but real DB):
+  - Count medication_logs for the patient’s active/latest admission’s treatment_plans in last 7 days.
+  - Expectation: 2 doses/day * 7 days = 14 (tweakable without UI change).
+*/
+$expectedPerDay = 2;
+$daysWindow = 7;
+$expectedTotal = $expectedPerDay * $daysWindow;
+
+if ($patientId) {
+  // Find admissions for patient (use the most recent admission)
+  $stmt = $mysqli->prepare("
+    SELECT a.id
+    FROM admissions a
+    WHERE a.patient_id = ?
+    ORDER BY a.admitted_on DESC
+    LIMIT 1
+  ");
+  $stmt->bind_param('i', $patientId);
+  $stmt->execute();
+  $stmt->bind_result($admissionId);
+  $hasAdmission = $stmt->fetch();
+  $stmt->close();
+
+  if ($hasAdmission) {
+    // Count medication logs for all medications under treatment plans for this admission in last 7 days
+    $stmt = $mysqli->prepare("
+      SELECT COUNT(ml.id) AS taken_count
+      FROM treatment_plans tp
+      JOIN medications m      ON m.treatment_id = tp.id
+      LEFT JOIN medication_logs ml ON ml.medication_id = m.id
+      WHERE tp.admission_id = ?
+        AND (ml.taken_at IS NULL OR ml.taken_at >= (NOW() - INTERVAL ? DAY))
+    ");
+    $stmt->bind_param('ii', $admissionId, $daysWindow);
+    $stmt->execute();
+    $stmt->bind_result($takenCount);
+    if ($stmt->fetch()) {
+      $adherenceTaken = (int)$takenCount;
+    }
+    $stmt->close();
+  } else {
+    // No admission → we can still count all logs linked to this patient's medications across all admissions
+    $stmt = $mysqli->prepare("
+      SELECT COUNT(ml.id) AS taken_count
+      FROM patients p
+      JOIN admissions a     ON a.patient_id = p.id
+      JOIN treatment_plans tp ON tp.admission_id = a.id
+      JOIN medications m      ON m.treatment_id = tp.id
+      LEFT JOIN medication_logs ml ON ml.medication_id = m.id
+      WHERE p.id = ?
+        AND (ml.taken_at IS NULL OR ml.taken_at >= (NOW() - INTERVAL ? DAY))
+    ");
+    $stmt->bind_param('ii', $patientId, $daysWindow);
+    $stmt->execute();
+    $stmt->bind_result($takenCount);
+    if ($stmt->fetch()) {
+      $adherenceTaken = (int)$takenCount;
+    }
+    $stmt->close();
+  }
+}
+
+$adherenceMissed = max(0, $expectedTotal - $adherenceTaken);
+$totalDosesForPct = max(1, $adherenceTaken + $adherenceMissed);
+$adherencePct = (int)round(($adherenceTaken / $totalDosesForPct) * 100);
+
+/* ----------------------------- Discharge Readiness --------------------------- */
+/*
+  If latest admission exists: use AVG(tp.progress) across its treatment_plans.
+  Else: leave 0. (UI still pretty)
+*/
+if (!empty($admissionId)) {
+  $stmt = $mysqli->prepare("
+    SELECT COALESCE(AVG(tp.progress),0) AS avg_progress
+    FROM treatment_plans tp
+    WHERE tp.admission_id = ?
+  ");
+  $stmt->bind_param('i', $admissionId);
+  $stmt->execute();
+  $stmt->bind_result($avgProgress);
+  if ($stmt->fetch()) {
+    $dischargeReadiness = (int)round($avgProgress);
+  }
+  $stmt->close();
+}
+
+/* ----------------------------- Mini Stats ----------------------------------- */
+/* Therapy sessions this week:
+   Count appointments with status='scheduled' or 'completed' within current week.
+*/
+if ($patientId) {
+  $stmt = $mysqli->prepare("
+    SELECT COUNT(a.id)
+    FROM appointments a
+    WHERE a.patient_id = ?
+      AND YEARWEEK(a.scheduled_at, 1) = YEARWEEK(CURDATE(), 1)
+      AND a.status IN ('scheduled','completed')
+  ");
+  $stmt->bind_param('i', $patientId);
+  $stmt->execute();
+  $stmt->bind_result($therapySessionsWeek);
+  $stmt->fetch();
+  $stmt->close();
+}
+
+/* Exercises done (demo proxy): min(10, floor(adherenceTaken / 1)) */
+$exercisesDone = min(10, max(0, (int)floor($adherenceTaken / 1)));
+
+/* Hydration label heuristic based on adherence */
+$hydrationLabel = ($adherencePct >= 85 ? 'Excellent' : ($adherencePct >= 60 ? 'Good' : 'Needs attention'));
+
+/* ----------------------------- Upcoming Appointments (2) --------------------- */
+if ($patientId) {
+  $stmt = $mysqli->prepare("
+    SELECT a.id,
+           a.scheduled_at,
+           a.status,
+           a.urgency,
+           d.name AS doctor_name
+    FROM appointments a
+    JOIN users d ON d.id = a.doctor_id
+    WHERE a.patient_id = ?
+      AND a.scheduled_at >= NOW()
+    ORDER BY a.scheduled_at ASC
+    LIMIT 2
+  ");
+  $stmt->bind_param('i', $patientId);
+  $stmt->execute();
+  $res = $stmt->get_result();
+  while ($row = $res->fetch_assoc()) {
+    $appointments[] = $row;
+  }
+  $stmt->close();
+}
+
+/* ----------------------------- Latest Notifications (2) ---------------------- */
+if ($userId) {
+  $stmt = $mysqli->prepare("
+    SELECT id, message, created_at, read_at
+    FROM notifications
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+    LIMIT 2
+  ");
+  $stmt->bind_param('i', $userId);
+  $stmt->execute();
+  $res = $stmt->get_result();
+  while ($row = $res->fetch_assoc()) {
+    $notifications[] = $row;
+  }
+  $stmt->close();
+}
+
+/* ----------------------------- Mood Sparkline (7 days) ----------------------- */
+/*
+   Map moods → scores: happy=5, neutral=3, sad=1, anxious=2, angry=1.
+   Build an array Mon..Sun for current week. If no value for a day, fallback to 3.
+*/
+$mapMood = ['happy'=>5, 'neutral'=>3, 'sad'=>1, 'anxious'=>2, 'angry'=>1];
+$moodSeries = [3,3,3,3,3,3,3]; // 7 days baseline
+if ($patientId) {
+  $stmt = $mysqli->prepare("
+    SELECT DATE(logged_at) as d, mood
+    FROM mood_logs
+    WHERE patient_id = ?
+      AND logged_at >= (CURDATE() - INTERVAL 6 DAY)
+    ORDER BY logged_at ASC
+  ");
+  $stmt->bind_param('i', $patientId);
+  $stmt->execute();
+  $res = $stmt->get_result();
+  // Build index for last 7 days labels
+  $last7 = [];
+  for ($i = 6; $i >= 0; $i--) {
+    $key = (new DateTime())->modify("-$i day")->format('Y-m-d');
+    $last7[$key] = null;
+  }
+  while ($row = $res->fetch_assoc()) {
+    $d = $row['d'];
+    $m = strtolower((string)$row['mood']);
+    if (array_key_exists($d, $last7)) {
+      $last7[$d] = $mapMood[$m] ?? 3;
+    }
+  }
+  $moodSeries = array_map(function($v){ return $v === null ? 3 : (int)$v; }, array_values($last7));
+  $stmt->close();
+}
+
+/* ----------------------------- Templating Vars -------------------------------- */
+$jsMoodData       = json_encode($moodSeries);
+$jsAdherenceTaken = (int)$adherenceTaken;
+$jsAdherenceMiss  = (int)$adherenceMissed;
+$jsAdherencePct   = (int)$adherencePct;
+$jsReadinessPct   = (int)$dischargeReadiness;
+
+// For the small stats UI
+$uiTherapyThisWeek = (int)$therapySessionsWeek;
+$uiExercisesDone   = (int)$exercisesDone;
+$uiHydrationLabel  = $hydrationLabel;
+
+// Pre-format appointments for display (date + time + names)
+function fmtApptItem(array $a) {
+  $dt = new DateTime($a['scheduled_at']);
+  $dateText = $dt->format('M j, Y — h:i A');
+  $title = 'Appointment';
+  // optional nicer title from urgency
+  if (!empty($a['urgency'])) {
+    $u = ucfirst($a['urgency']);
+    $title = ($u === 'High' ? 'Urgent Appointment' : 'Appointment');
+  }
+  return [
+    'title' => $title,
+    'date'  => $dateText,
+    'doctor'=> $a['doctor_name'] ?? 'Doctor'
+  ];
+}
+
+// Pre-format notifications (type → icon bg)
+function notifIcon($text) {
+  $t = strtolower($text);
+  if (str_contains($t, 'remind')) return ['bg'=>'bg-yellow-100','icon'=>'https://cdn-icons-png.flaticon.com/512/546/546394.png'];
+  if (str_contains($t, 'new') || str_contains($t, 'updated') || str_contains($t, 'resource')) return ['bg'=>'bg-green-100','icon'=>'https://cdn-icons-png.flaticon.com/512/1250/1250615.png'];
+  return ['bg'=>'bg-blue-100','icon'=>'https://cdn-icons-png.flaticon.com/512/545/545682.png'];
+}
+
+// Last updated display
+$lastUpdatedHuman = (new DateTime())->format('M j, Y — h:i A');
+
+?>
+<?php
+  // keep your original first lines exactly:
+  // requires auth.php in the same folder (session + require_auth())
+  // require_once __DIR__ . '/auth.php';
+  // require_auth();
+  $user = $_SESSION['user'] ?? ['name' => $userName];
+  $userNameSafe = esc($user['name'] ?? $userName);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -109,10 +419,12 @@ $userName = htmlspecialchars($user['name']);
     <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
       <div>
         <div class="flex items-center gap-4">
-          <div class="mini-icon">JD</div>
+          <div class="mini-icon"><?php echo esc(strtoupper(substr($userNameSafe,0,1))) . esc(strtoupper(substr($userNameSafe,1,1))); ?></div>
           <div>
-            <div class="text-lg font-semibold">Welcome back, <?php echo $userName; ?></div>
-            <div class="text-sm text-gray-500">Keep going — you’re making progress. Last updated: <span id="lastUpdated">Aug 12, 2025</span></div>
+            <div class="text-lg font-semibold">Welcome back, <?php echo esc($userNameSafe); ?></div>
+            <div class="text-sm text-gray-500">Keep going — you’re making progress. Last updated:
+              <span id="lastUpdated"><?php echo esc($lastUpdatedHuman); ?></span>
+            </div>
           </div>
         </div>
       </div>
@@ -121,11 +433,11 @@ $userName = htmlspecialchars($user['name']);
       <div class="flex gap-4 items-center">
         <div class="text-center">
           <div class="text-sm text-gray-500">Medication</div>
-          <div class="stat-pill mt-1">91% adherence</div>
+          <div class="stat-pill mt-1"><span id="pillAdh"><?php echo $jsAdherencePct; ?></span>% adherence</div>
         </div>
         <div class="text-center">
           <div class="text-sm text-gray-500">Discharge Readiness</div>
-          <div class="stat-pill mt-1">92%</div>
+          <div class="stat-pill mt-1"><span id="pillReadiness"><?php echo $jsReadinessPct; ?></span>%</div>
         </div>
         <div>
           <a href="dashboard.php#progress" class="px-4 py-2 bg-white text-cyan-600 rounded-lg font-semibold border border-white/20 hover:bg-white/90">View Details</a>
@@ -156,7 +468,7 @@ $userName = htmlspecialchars($user['name']);
             <div class="flex items-center justify-between">
               <div>
                 <div class="text-sm text-gray-500">Medication adherence</div>
-                <div class="text-lg font-semibold">91%</div>
+                <div class="text-lg font-semibold"><span id="txtAdh"><?php echo $jsAdherencePct; ?></span>%</div>
               </div>
               <div>
                 <button class="px-4 py-2 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600">Set Reminder</button>
@@ -166,23 +478,23 @@ $userName = htmlspecialchars($user['name']);
             <div class="mt-2">
               <div class="text-sm text-gray-500">Discharge readiness</div>
               <div class="w-full bg-white/10 rounded-full h-3 mt-2 overflow-hidden">
-                <div id="readinessBar" style="width:92%" class="h-3 bg-gradient-to-r from-cyan-400 to-cyan-600"></div>
+                <div id="readinessBar" style="width:<?php echo $jsReadinessPct; ?>%" class="h-3 bg-gradient-to-r from-cyan-400 to-cyan-600"></div>
               </div>
-              <div class="text-xs text-gray-500 mt-1">Score: 92 / 100</div>
+              <div class="text-xs text-gray-500 mt-1">Score: <span id="txtReady"><?php echo $jsReadinessPct; ?></span> / 100</div>
             </div>
 
             <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
               <div class="glass p-3 rounded-lg text-center">
                 <div class="text-sm text-gray-500">Therapy sessions</div>
-                <div class="font-semibold">3 this week</div>
+                <div class="font-semibold"><span id="txtTherapy"><?php echo $uiTherapyThisWeek; ?></span> this week</div>
               </div>
               <div class="glass p-3 rounded-lg text-center">
                 <div class="text-sm text-gray-500">Exercises done</div>
-                <div class="font-semibold">8 / 10</div>
+                <div class="font-semibold"><span id="txtExercise"><?php echo $uiExercisesDone; ?></span> / 10</div>
               </div>
               <div class="glass p-3 rounded-lg text-center">
                 <div class="text-sm text-gray-500">Hydration</div>
-                <div class="font-semibold">Good</div>
+                <div class="font-semibold" id="txtHydration"><?php echo esc($uiHydrationLabel); ?></div>
               </div>
             </div>
 
@@ -198,35 +510,55 @@ $userName = htmlspecialchars($user['name']);
         </div>
 
         <ul class="space-y-3">
-          <li class="flex items-start gap-4">
-            <div class="w-12 h-12 flex items-center justify-center rounded-lg bg-white/5">
-              <img src="https://cdn-icons-png.flaticon.com/512/2965/2965567.png" alt="" class="w-6 h-6 opacity-90">
-            </div>
-            <div class="flex-1">
-              <div class="flex items-center justify-between">
-                <div>
-                  <div class="font-semibold">Physiotherapy Session</div>
-                  <div class="text-xs text-gray-500">Aug 14, 2025 — 11:00 AM</div>
+          <?php if (!empty($appointments)): ?>
+            <?php foreach ($appointments as $a):
+              $f = fmtApptItem($a); ?>
+              <li class="flex items-start gap-4">
+                <div class="w-12 h-12 flex items-center justify-center rounded-lg bg-white/5">
+                  <img src="https://cdn-icons-png.flaticon.com/512/2965/2965567.png" alt="" class="w-6 h-6 opacity-90">
                 </div>
-                <div class="text-sm text-gray-500">Dr. Mehta</div>
-              </div>
-            </div>
-          </li>
-
-          <li class="flex items-start gap-4">
-            <div class="w-12 h-12 flex items-center justify-center rounded-lg bg-white/5">
-              <img src="https://cdn-icons-png.flaticon.com/512/2913/2913142.png" alt="" class="w-6 h-6 opacity-90">
-            </div>
-            <div class="flex-1">
-              <div class="flex items-center justify-between">
-                <div>
-                  <div class="font-semibold">Mental Health Check-in</div>
-                  <div class="text-xs text-gray-500">Aug 16, 2025 — 09:00 AM</div>
+                <div class="flex-1">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <div class="font-semibold"><?php echo esc($f['title']); ?></div>
+                      <div class="text-xs text-gray-500"><?php echo esc($f['date']); ?></div>
+                    </div>
+                    <div class="text-sm text-gray-500"><?php echo esc($f['doctor']); ?></div>
+                  </div>
                 </div>
-                <div class="text-sm text-gray-500">Counselor</div>
+              </li>
+            <?php endforeach; ?>
+          <?php else: ?>
+            <!-- Fallback to your original two demo items if no DB data -->
+            <li class="flex items-start gap-4">
+              <div class="w-12 h-12 flex items-center justify-center rounded-lg bg-white/5">
+                <img src="https://cdn-icons-png.flaticon.com/512/2965/2965567.png" alt="" class="w-6 h-6 opacity-90">
               </div>
-            </div>
-          </li>
+              <div class="flex-1">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <div class="font-semibold">Physiotherapy Session</div>
+                    <div class="text-xs text-gray-500">Aug 14, 2025 — 11:00 AM</div>
+                  </div>
+                  <div class="text-sm text-gray-500">Dr. Mehta</div>
+                </div>
+              </div>
+            </li>
+            <li class="flex items-start gap-4">
+              <div class="w-12 h-12 flex items-center justify-center rounded-lg bg-white/5">
+                <img src="https://cdn-icons-png.flaticon.com/512/2913/2913142.png" alt="" class="w-6 h-6 opacity-90">
+              </div>
+              <div class="flex-1">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <div class="font-semibold">Mental Health Check-in</div>
+                    <div class="text-xs text-gray-500">Aug 16, 2025 — 09:00 AM</div>
+                  </div>
+                  <div class="text-sm text-gray-500">Counselor</div>
+                </div>
+              </div>
+            </li>
+          <?php endif; ?>
         </ul>
       </section>
 
@@ -238,25 +570,41 @@ $userName = htmlspecialchars($user['name']);
         </div>
 
         <div class="space-y-3">
-          <div class="flex items-start gap-3">
-            <div class="w-10 h-10 rounded-lg bg-yellow-100 flex items-center justify-center">
-              <img src="https://cdn-icons-png.flaticon.com/512/546/546394.png" class="w-5 h-5" alt="">
+          <?php if (!empty($notifications)): ?>
+            <?php foreach ($notifications as $n):
+              $ico = notifIcon($n['message'] ?? '');
+              $when = (new DateTime($n['created_at']))->format('M j, Y — H:i'); ?>
+              <div class="flex items-start gap-3">
+                <div class="w-10 h-10 rounded-lg <?php echo esc($ico['bg']); ?> flex items-center justify-center">
+                  <img src="<?php echo esc($ico['icon']); ?>" class="w-5 h-5" alt="">
+                </div>
+                <div>
+                  <div class="text-sm"><?php echo esc($n['message']); ?></div>
+                  <div class="text-xs text-gray-400"><?php echo esc($when); ?></div>
+                </div>
+              </div>
+            <?php endforeach; ?>
+          <?php else: ?>
+            <!-- Your original demo items as fallback -->
+            <div class="flex items-start gap-3">
+              <div class="w-10 h-10 rounded-lg bg-yellow-100 flex items-center justify-center">
+                <img src="https://cdn-icons-png.flaticon.com/512/546/546394.png" class="w-5 h-5" alt="">
+              </div>
+              <div>
+                <div class="text-sm"><span class="font-semibold">Reminder:</span> Take 1 tablet of Painkiller — 08:00 AM</div>
+                <div class="text-xs text-gray-400">Today · 07:58</div>
+              </div>
             </div>
-            <div>
-              <div class="text-sm"><span class="font-semibold">Reminder:</span> Take 1 tablet of Painkiller — 08:00 AM</div>
-              <div class="text-xs text-gray-400">Today · 07:58</div>
+            <div class="flex items-start gap-3">
+              <div class="w-10 h-10 rounded-lg bg-green-100 flex items-center justify-center">
+                <img src="https://cdn-icons-png.flaticon.com/512/1250/1250615.png" class="w-5 h-5" alt="">
+              </div>
+              <div>
+                <div class="text-sm"><span class="font-semibold">New resource:</span> Post-surgery exercises PDF available</div>
+                <div class="text-xs text-gray-400">Yesterday</div>
+              </div>
             </div>
-          </div>
-
-          <div class="flex items-start gap-3">
-            <div class="w-10 h-10 rounded-lg bg-green-100 flex items-center justify-center">
-              <img src="https://cdn-icons-png.flaticon.com/512/1250/1250615.png" class="w-5 h-5" alt="">
-            </div>
-            <div>
-              <div class="text-sm"><span class="font-semibold">New resource:</span> Post-surgery exercises PDF available</div>
-              <div class="text-xs text-gray-400">Yesterday</div>
-            </div>
-          </div>
+          <?php endif; ?>
         </div>
       </section>
 
@@ -264,7 +612,7 @@ $userName = htmlspecialchars($user['name']);
 
     <!-- right sidebar: mental health + discharge toolkit + AI assistant -->
     <aside class="space-y-6">
-      <!-- Mental health mini -->
+      <!-- Mood Tracker -->
       <div class="glass rounded-xl p-6 reveal card-deep">
         <div class="flex items-center justify-between mb-3">
           <h4 class="font-semibold">Mood Tracker</h4>
@@ -314,6 +662,19 @@ $userName = htmlspecialchars($user['name']);
 
   <!-- Scripts: charts, interactions, 3D tilt & scroll reveal -->
   <script>
+    // ------ Server-fed values ------
+    const ADH_TAKEN   = <?php echo (int)$jsAdherenceTaken; ?>;
+    const ADH_MISSED  = <?php echo (int)$jsAdherenceMiss; ?>;
+    const ADH_PCT     = <?php echo (int)$jsAdherencePct; ?>;
+    const READY_PCT   = <?php echo (int)$jsReadinessPct; ?>;
+    const MOOD_SERIES = <?php echo $jsMoodData; ?>;
+
+    // Inject into static text (keeps your markup the same but data is live)
+    const pillAdh = document.getElementById('pillAdh'); if (pillAdh) pillAdh.textContent = ADH_PCT;
+    const pillReady = document.getElementById('pillReadiness'); if (pillReady) pillReady.textContent = READY_PCT;
+    const txtAdh = document.getElementById('txtAdh'); if (txtAdh) txtAdh.textContent = ADH_PCT;
+    const txtReady = document.getElementById('txtReady'); if (txtReady) txtReady.textContent = READY_PCT;
+
     /* ---------- Chart: Adherence doughnut ---------- */
     const ctx = document.getElementById('adherenceChart').getContext('2d');
     const adherenceChart = new Chart(ctx, {
@@ -321,7 +682,7 @@ $userName = htmlspecialchars($user['name']);
       data: {
         labels: ['Taken','Missed'],
         datasets: [{
-          data: [91,9],
+          data: [Math.max(0, ADH_TAKEN), Math.max(0, ADH_MISSED)],
           backgroundColor: ['#06b6d4','#e6f7f9'],
           borderWidth: 0
         }]
@@ -343,7 +704,7 @@ $userName = htmlspecialchars($user['name']);
         labels: ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'],
         datasets: [{
           label: 'Mood score',
-          data: [3,4,3,4,5,4,4], // mock weekly
+          data: MOOD_SERIES && MOOD_SERIES.length === 7 ? MOOD_SERIES : [3,4,3,4,5,4,4],
           borderColor: '#06b6d4',
           backgroundColor: 'rgba(6,182,212,0.12)',
           tension: 0.4,
@@ -357,7 +718,9 @@ $userName = htmlspecialchars($user['name']);
       }
     });
 
-    /* ---------- Mood click handler (mock) ---------- */
+    /* ---------- Mood click handler (demo write) ----------
+       This remains a front-end demo action (no backend write per your request).
+    */
     function recordMood(m) {
       const el = document.getElementById('assistantReply');
       el.innerText = 'Thanks — your mood (' + m + ') was recorded (demo).';
@@ -374,14 +737,13 @@ $userName = htmlspecialchars($user['name']);
       const q = document.getElementById('assistantInput').value.trim();
       const out = document.getElementById('assistantReply');
       if(!q) { out.innerText = 'Please type a question.'; return; }
-      // simple rule-based demo responses
       const ql = q.toLowerCase();
       if(ql.includes('next') && ql.includes('session')) {
-        out.innerText = 'Your next session is Physiotherapy on Aug 14, 2025 at 11:00 AM with Dr. Mehta.';
+        out.innerText = 'Your next session is listed above in Appointments.';
       } else if(ql.includes('medic') || ql.includes('medicine')) {
-        out.innerText = 'Take your medications as per the schedule. Your next dose is at 08:00 AM.';
+        out.innerText = 'Take your medications as per the schedule. Adherence currently at ' + ADH_PCT + '%.';
       } else if(ql.includes('discharge')) {
-        out.innerText = 'Your discharge readiness is currently 92%. You can download the plan from the Discharge Toolkit.';
+        out.innerText = 'Your discharge readiness is currently ' + READY_PCT + '%. Check the Discharge Toolkit.';
       } else {
         out.innerText = 'I\'m a demo assistant — please ask about appointments, medication, or discharge.';
       }
@@ -420,9 +782,12 @@ $userName = htmlspecialchars($user['name']);
     }, { threshold: 0.16 });
     reveals.forEach(r => io.observe(r));
 
-    /* ---------- small: update lastUpdated to current time (demo) ---------- */
-    document.getElementById('lastUpdated').innerText = new Date().toLocaleString();
-
+    /* ---------- small: update lastUpdated to current time (already set by PHP, keep for demo) ---------- */
+    // document.getElementById('lastUpdated').innerText = new Date().toLocaleString();
   </script>
 </body>
 </html>
+<?php
+// Optional: close DB
+$mysqli->close();
+?>
