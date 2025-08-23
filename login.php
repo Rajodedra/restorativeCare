@@ -8,7 +8,7 @@ const RC_DB_HOST = 'localhost';
 const RC_DB_USER = 'root';
 const RC_DB_PASS = '';
 const RC_DB_NAME = 'restorativecare';
-const RC_DB_PORT = 3307;
+const RC_DB_PORT = 3306;
 
 const RC_SESSION_NAME       = 'rcsid';
 const RC_SESSION_IDLE_SECS  = 1800;
