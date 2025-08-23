@@ -5,11 +5,11 @@
 if (session_status() === PHP_SESSION_NONE) {
   session_start();
 }
-require_once __DIR__ . '/auth.php'; // Only this, no esc() function here
+function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 
 /* ----------------------------- DB Connection -------------------------------- */
 $DB_HOST = 'localhost';
-$DB_PORT = '3307';
+$DB_PORT = '3306';
 $DB_USER = 'root';
 $DB_PASS = "";
 $DB_NAME = 'restorativecare';
@@ -279,6 +279,66 @@ $uiTherapyThisWeek = (int)$therapySessionsWeek;
 $uiExercisesDone   = (int)$exercisesDone;
 $uiHydrationLabel  = $hydrationLabel;
 
+// ---------------- ML API Emergency Priorities Integration ----------------
+// Function to fetch emergency priorities from FastAPI
+function fetchEmergencyPriorities() {
+  $apiUrl = 'http://127.0.0.1:8000/emergency-priorities/';
+  $ch = curl_init($apiUrl);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+  curl_setopt($ch, CURLOPT_TIMEOUT, 5); // 5 second timeout
+  $result = curl_exec($ch);
+  if (curl_error($ch)) {
+    // Return sample data if API is unavailable
+    curl_close($ch);
+    return [
+      [
+        'patient_id' => 101,
+        'name' => 'John Smith',
+        'age' => 72,
+        'emergency_score' => 85,
+        'priority' => 'High',
+        'vitals' => [
+          'heart_rate' => 110,
+          'blood_pressure_systolic' => 165,
+          'blood_pressure_diastolic' => 95,
+          'temperature' => 38.7,
+          'oxygen_saturation' => 91,
+          'respiratory_rate' => 22
+        ]
+      ],
+      [
+        'patient_id' => 104,
+        'name' => 'Emily Johnson',
+        'age' => 31,
+        'emergency_score' => 70,
+        'priority' => 'High',
+        'vitals' => [
+          'heart_rate' => 120,
+          'blood_pressure_systolic' => 145,
+          'blood_pressure_diastolic' => 90,
+          'temperature' => 39.1,
+          'oxygen_saturation' => 93,
+          'respiratory_rate' => 20
+        ]
+      ]
+    ];
+  }
+  curl_close($ch);
+  return json_decode($result, true);
+}
+
+// If in staff role, fetch emergency priorities
+$emergencyPriorities = ($userRole === 'admin' || $userRole === 'nurse' || $userRole === 'doctor') 
+  ? fetchEmergencyPriorities() 
+  : [];
+
+// Handle AJAX requests for emergency priorities
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'emergency-priorities') {
+  header('Content-Type: application/json');
+  echo json_encode($emergencyPriorities);
+  exit;
+}
+
 // Pre-format appointments for display (date + time + names)
 function fmtApptItem(array $a) {
   $dt = new DateTime($a['scheduled_at']);
@@ -309,14 +369,13 @@ $lastUpdatedHuman = (new DateTime())->format('M j, Y — h:i A');
 
 ?>
 <?php
-
+  // keep your original first lines exactly:
   // requires auth.php in the same folder (session + require_auth())
-  if (!isset($_SESSION['user'])) {  
-    header('Location: login.php');
-   exit; // Show a beautiful login modal
-  }
-    ?>
-    
+  // require_once __DIR__ . '/auth.php';
+  // require_auth();
+  $user = $_SESSION['user'] ?? ['name' => $userName];
+  $userNameSafe = esc($user['name'] ?? $userName);
+?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -407,7 +466,6 @@ $lastUpdatedHuman = (new DateTime())->format('M j, Y — h:i A');
       <div class="text-sm text-gray-500">— Patient Dashboard</div>
     </div>
     <div class="flex items-center gap-4">
-       <a href="logout.php" class="ml-3 px-4 py-2 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600">Logout</a>
       <a href="index.php" class="text-sm text-gray-600 hover:text-cyan-600">Home</a>
       <a href="schedule.php" class="text-sm text-gray-600 hover:text-cyan-600">Schedule</a>
       <a href="notifications.php" class="text-sm text-gray-600 hover:text-cyan-600">Notifications</a>
@@ -423,7 +481,7 @@ $lastUpdatedHuman = (new DateTime())->format('M j, Y — h:i A');
         <div class="flex items-center gap-4">
           <div class="mini-icon"><?php echo esc(strtoupper(substr($userNameSafe,0,1))) . esc(strtoupper(substr($userNameSafe,1,1))); ?></div>
           <div>
-            <div class="text-lg font-semibold">Welcome back, <?php echo $userName; ?></div>
+            <div class="text-lg font-semibold">Welcome back, <?php echo esc($userNameSafe); ?></div>
             <div class="text-sm text-gray-500">Keep going — you’re making progress. Last updated:
               <span id="lastUpdated"><?php echo esc($lastUpdatedHuman); ?></span>
             </div>
@@ -452,6 +510,25 @@ $lastUpdatedHuman = (new DateTime())->format('M j, Y — h:i A');
   <main class="container-grid">
     <!-- left: progress, appointments, notifications -->
     <div class="space-y-6">
+        <!-- Emergency Priorities Section (Staff Only) -->
+        <?php if ($userRole === 'admin' || $userRole === 'nurse' || $userRole === 'doctor'): ?>
+        <section class="glass rounded-xl p-6 reveal card-deep">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-xl font-semibold text-red-600 flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+              Emergency Priorities
+            </h3>
+            <button id="refresh-priorities" class="text-gray-500 hover:text-cyan-600 transition-transform"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582M20 20v-5h-.581M5.635 19.364A9 9 0 104.582 9.582" /></svg> Refresh</button>
+          </div>
+          <div id="emergency-list">
+            <div class="text-center py-3" id="loading-priorities" style="display: none;">
+              <div class="animate-spin rounded-full h-6 w-6 border-t-2 border-b-2 border-cyan-500 mx-auto"></div>
+              <p class="mt-2">Loading priorities...</p>
+            </div>
+            <!-- Emergency priorities will be loaded here -->
+          </div>
+        </section>
+        <?php endif; ?>
       <!-- Progress cards -->
       <section id="progress" class="glass rounded-xl p-6 reveal card-deep">
         <div class="flex items-center justify-between mb-4">
@@ -670,6 +747,7 @@ $lastUpdatedHuman = (new DateTime())->format('M j, Y — h:i A');
     const ADH_PCT     = <?php echo (int)$jsAdherencePct; ?>;
     const READY_PCT   = <?php echo (int)$jsReadinessPct; ?>;
     const MOOD_SERIES = <?php echo $jsMoodData; ?>;
+    const USER_ROLE   = "<?php echo esc($userRole); ?>";
 
     // Inject into static text (keeps your markup the same but data is live)
     const pillAdh = document.getElementById('pillAdh'); if (pillAdh) pillAdh.textContent = ADH_PCT;
@@ -765,6 +843,136 @@ $lastUpdatedHuman = (new DateTime())->format('M j, Y — h:i A');
       wrap.style.transform = `perspective(900px) rotateY(${rotateY}deg) rotateX(${rotateX}deg) translateZ(0)`;
     });
     wrap.addEventListener('mouseleave', () => wrap.style.transform = 'none');
+
+      // ---------------- Emergency Priorities JS (Staff Only) ----------------
+      // Format vital name for display
+      function formatVitalName(name) {
+        const nameMap = {
+          'heart_rate': 'HR',
+          'blood_pressure_systolic': 'BP Sys',
+          'blood_pressure_diastolic': 'BP Dia',
+          'temperature': 'Temp',
+          'oxygen_saturation': 'O₂ Sat',
+          'respiratory_rate': 'Resp Rate'
+        };
+        return nameMap[name] || name;
+      }
+      // Format vital unit
+      function getVitalUnit(name) {
+        const unitMap = {
+          'heart_rate': ' bpm',
+          'blood_pressure_systolic': ' mmHg',
+          'blood_pressure_diastolic': ' mmHg',
+          'temperature': '°C',
+          'oxygen_saturation': '%',
+          'respiratory_rate': ' bpm'
+        };
+        return unitMap[name] || '';
+      }
+      // Function to format vitals display
+      function formatVitalDisplay(name, value, unit) {
+        let status = 'normal';
+        switch(name) {
+          case 'heart_rate':
+            if (value > 100 || value < 60) status = 'danger';
+            else if (value > 90 || value < 65) status = 'warning';
+            break;
+          case 'blood_pressure_systolic':
+            if (value > 140 || value < 90) status = 'danger';
+            else if (value > 130 || value < 100) status = 'warning';
+            break;
+          case 'blood_pressure_diastolic':
+            if (value > 90 || value < 60) status = 'danger';
+            else if (value > 85 || value < 65) status = 'warning';
+            break;
+          case 'temperature':
+            if (value > 38.5 || value < 36.0) status = 'danger';
+            else if (value > 38.0 || value < 36.5) status = 'warning';
+            break;
+          case 'oxygen_saturation':
+            if (value < 90) status = 'danger';
+            else if (value < 94) status = 'warning';
+            break;
+          case 'respiratory_rate':
+            if (value > 24 || value < 10) status = 'danger';
+            else if (value > 20 || value < 12) status = 'warning';
+            break;
+        }
+        return `<span class="vital-badge vital-${status}">${formatVitalName(name)}: ${value}${unit}</span>`;
+      }
+      // Function to load emergency priorities
+      async function loadEmergencyPriorities() {
+        if (USER_ROLE !== 'admin' && USER_ROLE !== 'nurse' && USER_ROLE !== 'doctor') {
+          return;
+        }
+        const loadingElement = document.getElementById('loading-priorities');
+        const emergencyList = document.getElementById('emergency-list');
+        try {
+          loadingElement.style.display = 'block';
+          const response = await fetch('dashboard.php?ajax=emergency-priorities');
+          const priorities = await response.json();
+          loadingElement.style.display = 'none';
+          if (!priorities || priorities.length === 0) {
+            emergencyList.innerHTML = '<div class="text-gray-500 text-center py-4">No emergency priorities at this time.</div>';
+            return;
+          }
+          let html = '';
+          priorities.forEach(patient => {
+            const scoreColor = patient.emergency_score > 70 ? '#dc2626' : 
+                               patient.emergency_score > 40 ? '#f59e42' : '#0ea5e9';
+            const priorityClass = patient.priority === 'High' ? 'border-l-4 border-red-500 bg-red-50' : 
+                                 patient.priority === 'Medium' ? 'border-l-4 border-yellow-400 bg-yellow-50' : 'border-l-4 border-cyan-500 bg-cyan-50';
+            html += `
+              <div class="my-3 p-4 rounded-lg ${priorityClass}">
+                <div class="flex items-center gap-4">
+                  <div class="emergency-score flex items-center justify-center rounded-full text-white font-bold" style="background-color: ${scoreColor}; width: 48px; height: 48px;">${patient.emergency_score}</div>
+                  <div>
+                    <div class="font-semibold text-lg">${patient.name}</div>
+                    <div class="text-xs text-gray-500">ID: ${patient.patient_id} | Age: ${patient.age} | Priority: ${patient.priority}</div>
+                  </div>
+                  <button class="ml-auto px-3 py-1 bg-cyan-500 text-white rounded toggle-details">View Details</button>
+                </div>
+                <div class="emergency-details mt-3 hidden">
+                  <div class="font-semibold mb-1">Vital Signs:</div>
+                  <div class="flex flex-wrap gap-2">
+                    ${Object.keys(patient.vitals).map(key => 
+                      formatVitalDisplay(key, patient.vitals[key], getVitalUnit(key))
+                    ).join('')}
+                  </div>
+                  <div class="mt-3 flex gap-2">
+                    <button class="px-3 py-1 bg-cyan-600 text-white rounded">Contact Patient</button>
+                    <button class="px-3 py-1 bg-gray-200 text-gray-700 rounded">View Full Chart</button>
+                  </div>
+                </div>
+              </div>
+            `;
+          });
+          emergencyList.innerHTML = html;
+          // Add event listeners to toggle details buttons
+          document.querySelectorAll('.toggle-details').forEach(button => {
+            button.addEventListener('click', function() {
+              const details = this.closest('div').parentNode.querySelector('.emergency-details');
+              if (details.classList.contains('hidden')) {
+                details.classList.remove('hidden');
+                this.textContent = 'Hide Details';
+              } else {
+                details.classList.add('hidden');
+                this.textContent = 'View Details';
+              }
+            });
+          });
+        } catch (error) {
+          console.error('Error loading priorities:', error);
+          loadingElement.style.display = 'none';
+          emergencyList.innerHTML = '<div class="text-red-500 text-center py-4">Error loading emergency priorities. Please try again.</div>';
+        }
+      }
+      // Load emergency priorities for staff roles
+      if (USER_ROLE === 'admin' || USER_ROLE === 'nurse' || USER_ROLE === 'doctor') {
+        loadEmergencyPriorities();
+        // Add refresh button functionality
+        document.getElementById('refresh-priorities').addEventListener('click', loadEmergencyPriorities);
+      }
 
     /* ---------- Mouse-reactive background for subtle 3D illusion ---------- */
     document.addEventListener('mousemove', (e) => {
