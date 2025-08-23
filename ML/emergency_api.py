@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import joblib
 import pandas as pd
+import pymysql
 from typing import List, Dict, Any, Optional
 import uvicorn
 
@@ -26,29 +27,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Sample patient data for demonstration
-SAMPLE_PATIENTS = [
-    {"id": 101, "name": "John Smith", "age": 72, "vitals": {
-        "heart_rate": 110, "blood_pressure_systolic": 165, "blood_pressure_diastolic": 95,
-        "temperature": 38.7, "oxygen_saturation": 91, "respiratory_rate": 22
-    }},
-    {"id": 102, "name": "Maria Garcia", "age": 65, "vitals": {
-        "heart_rate": 88, "blood_pressure_systolic": 130, "blood_pressure_diastolic": 85,
-        "temperature": 37.2, "oxygen_saturation": 96, "respiratory_rate": 16
-    }},
-    {"id": 103, "name": "David Lee", "age": 45, "vitals": {
-        "heart_rate": 75, "blood_pressure_systolic": 120, "blood_pressure_diastolic": 80,
-        "temperature": 36.8, "oxygen_saturation": 98, "respiratory_rate": 14
-    }},
-    {"id": 104, "name": "Emily Johnson", "age": 31, "vitals": {
-        "heart_rate": 120, "blood_pressure_systolic": 145, "blood_pressure_diastolic": 90,
-        "temperature": 39.1, "oxygen_saturation": 93, "respiratory_rate": 20
-    }},
-    {"id": 105, "name": "Robert Williams", "age": 58, "vitals": {
-        "heart_rate": 95, "blood_pressure_systolic": 150, "blood_pressure_diastolic": 95,
-        "temperature": 37.5, "oxygen_saturation": 94, "respiratory_rate": 18
-    }}
-]
+
+# --- MySQL connection settings (adjust as needed) ---
+MYSQL_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': '',
+    'database': 'restorativecare',
+    'port': 3307
+}
+
+# Fetch latest vitals for all patients
+def fetch_patients_with_latest_vitals():
+    conn = pymysql.connect(**MYSQL_CONFIG, cursorclass=pymysql.cursors.DictCursor)
+    try:
+        with conn.cursor() as cur:
+            # Get all patients with their user info
+            cur.execute("""
+                SELECT p.id as patient_id, u.name, u.id as user_id, YEAR(CURDATE())-YEAR(p.dob) as age
+                FROM patients p
+                JOIN users u ON p.user_id = u.id
+            """)
+            patients = cur.fetchall()
+            # For each patient, get their latest vitals
+            for patient in patients:
+                cur.execute("""
+                    SELECT heart_rate, bp, temperature, spo2, respiratory_rate
+                    FROM patient_vitals
+                    WHERE patient_id = %s
+                    ORDER BY logged_at DESC LIMIT 1
+                """, (patient['patient_id'],))
+                vitals = cur.fetchone()
+                if vitals:
+                    # Split bp into systolic/diastolic
+                    bp_sys, bp_dia = 0, 0
+                    if vitals['bp'] and '/' in vitals['bp']:
+                        try:
+                            bp_sys, bp_dia = map(int, vitals['bp'].split('/'))
+                        except:
+                            bp_sys, bp_dia = 0, 0
+                    patient['vitals'] = {
+                        'heart_rate': vitals['heart_rate'] or 0,
+                        'blood_pressure_systolic': bp_sys,
+                        'blood_pressure_diastolic': bp_dia,
+                        'temperature': float(vitals['temperature']) if vitals['temperature'] is not None else 0.0,
+                        'oxygen_saturation': vitals['spo2'] or 0,
+                        'respiratory_rate': vitals['respiratory_rate'] or 0
+                    }
+                else:
+                    patient['vitals'] = {
+                        'heart_rate': 0,
+                        'blood_pressure_systolic': 0,
+                        'blood_pressure_diastolic': 0,
+                        'temperature': 0.0,
+                        'oxygen_saturation': 0,
+                        'respiratory_rate': 0
+                    }
+            return patients
+    finally:
+        conn.close()
 
 def load_model():
     try:
@@ -64,19 +101,16 @@ def read_root():
 
 @app.get("/patients/")
 def get_patients():
-    return SAMPLE_PATIENTS
+    return fetch_patients_with_latest_vitals()
 
 @app.get("/emergency-priorities/")
 def get_emergency_priorities():
     model = load_model()
-    
-    # If model is not available, use a simplified scoring algorithm
+    patients = fetch_patients_with_latest_vitals()
+    results = []
     if model is None:
-        results = []
-        for patient in SAMPLE_PATIENTS:
+        for patient in patients:
             vitals = patient["vitals"]
-            
-            # Simple heuristic algorithm for emergency scoring
             score = 0
             if vitals["heart_rate"] > 100 or vitals["heart_rate"] < 60:
                 score += 20
@@ -90,11 +124,9 @@ def get_emergency_priorities():
                 score += 20
             if vitals["respiratory_rate"] > 20 or vitals["respiratory_rate"] < 12:
                 score += 10
-                
             emergency = score >= 40
-            
             results.append({
-                "patient_id": patient["id"],
+                "patient_id": patient["patient_id"],
                 "name": patient["name"],
                 "age": patient["age"],
                 "vitals": vitals,
@@ -103,14 +135,11 @@ def get_emergency_priorities():
                 "priority": "High" if score >= 60 else "Medium" if score >= 40 else "Low"
             })
     else:
-        # Use the trained model
-        results = []
-        for patient in SAMPLE_PATIENTS:
+        for patient in patients:
             vitals = patient["vitals"]
             prediction = predict_patient_urgency(vitals, model)
-            
             results.append({
-                "patient_id": patient["id"],
+                "patient_id": patient["patient_id"],
                 "name": patient["name"],
                 "age": patient["age"],
                 "vitals": vitals,
@@ -119,8 +148,6 @@ def get_emergency_priorities():
                 "priority": "High" if prediction["probability_emergency"] > 0.7 else 
                            "Medium" if prediction["probability_emergency"] > 0.4 else "Low"
             })
-    
-    # Sort by emergency score (highest first)
     results.sort(key=lambda x: x["emergency_score"], reverse=True)
     return results
 
