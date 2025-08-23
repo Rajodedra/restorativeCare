@@ -5,7 +5,7 @@
 if (session_status() === PHP_SESSION_NONE) {
   session_start();
 }
-function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+require_once __DIR__ . '/auth.php'; // Only this, no esc() function here
 
 /* ----------------------------- DB Connection -------------------------------- */
 $DB_HOST = 'localhost';
@@ -309,13 +309,15 @@ $lastUpdatedHuman = (new DateTime())->format('M j, Y — h:i A');
 
 ?>
 <?php
-  // keep your original first lines exactly:
+
   // requires auth.php in the same folder (session + require_auth())
-  // require_once __DIR__ . '/auth.php';
-  // require_auth();
-  $user = $_SESSION['user'] ?? ['name' => $userName];
-  $userNameSafe = esc($user['name'] ?? $userName);
-?>
+  if (!isset($_SESSION['user'])) {
+    echo "<sciript>alert("not logged in")</script>";
+    header('Location: login.php');
+   exit; // Show a beautiful login modal
+  }
+    ?>
+    
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -406,6 +408,7 @@ $lastUpdatedHuman = (new DateTime())->format('M j, Y — h:i A');
       <div class="text-sm text-gray-500">— Patient Dashboard</div>
     </div>
     <div class="flex items-center gap-4">
+       <a href="logout.php" class="ml-3 px-4 py-2 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600">Logout</a>
       <a href="index.php" class="text-sm text-gray-600 hover:text-cyan-600">Home</a>
       <a href="schedule.php" class="text-sm text-gray-600 hover:text-cyan-600">Schedule</a>
       <a href="notifications.php" class="text-sm text-gray-600 hover:text-cyan-600">Notifications</a>

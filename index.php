@@ -2,6 +2,7 @@
 // index.php — RestorativeCare (Premium Home) — single-file drop-in
 // NOTE: keep every page in the same folder as requested (admit.php, schedule.php, dashboard.php, etc.)
 $year = date('Y');
+function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -308,6 +309,7 @@ $year = date('Y');
         <a href="contact.php">Contact</a>
       </div>
       <div class="nav-cta flex items-center gap-2">
+        <a href="Login.php" class="btn btn-ghost">Login </a>
         <a href="dashboard.php" class="btn btn-ghost">Dashboard</a>
         <a href="admit.php" class="btn btn-primary">Admit Patient</a>
         <button id="navToggle" class="md:hidden btn btn-ghost" aria-label="Menu">

@@ -108,7 +108,6 @@ function rc_redirect_for_role(string $role): void {
     if ($role === 'admin' || $role === 'superadmin' || $role === 'doctor') {
         header('Location: '.RC_ADMIN_HOME); exit;
     }
- 
     header('Location: '.RC_DEFAULT_HOME); exit;
 }
 
@@ -151,7 +150,8 @@ if (rc_is_post() && !$LOCKED) {
         if ($email === '' || $pass === '') { throw new RuntimeException('Please enter email and password.'); }
 
         $db = rc_db();
-        $stmt = rc_q($db, 'SELECT id, name, role, password_hash FROM users WHERE email = ? LIMIT 1', 's', [$email]);
+        // Use the correct field name for password (pswd or password)
+        $stmt = rc_q($db, 'SELECT id, name, role, pswd FROM users WHERE email = ? LIMIT 1', 's', [$email]);
         $res  = $stmt->get_result();
         $user = $res ? $res->fetch_assoc() : null;
         $stmt->close();
@@ -161,21 +161,17 @@ if (rc_is_post() && !$LOCKED) {
             throw new RuntimeException('This account is registered as "'.esc($user['role']).'". Please select that role.');
         }
 
-        $hash = (string)($user['password_hash'] ?? '');
+        $dbPass = (string)($user['pswd'] ?? '');
         $ok = false;
-        if ($hash !== '' && $hash[0] === '$') {
-            $ok = password_verify($pass, $hash);
-            if ($ok && password_needs_rehash($hash, PASSWORD_DEFAULT)) {
-                $new = password_hash($pass, PASSWORD_DEFAULT);
-                rc_q($db, 'UPDATE users SET password_hash = ? WHERE id = ?', 'si', [$new, (int)$user['id']])->close();
-            }
-        } else {
-            if (strlen($hash) === 32) { $ok = (md5($pass) === strtolower($hash)); }
-            if ($ok) {
-                $new = password_hash($pass, PASSWORD_DEFAULT);
-                rc_q($db, 'UPDATE users SET password_hash = ? WHERE id = ?', 'si', [$new, (int)$user['id']])->close();
-            }
+
+        // Simple password check (no hashing)
+        if ($dbPass !== '' && $pass === $dbPass) {
+            $ok = true;
         }
+
+        // Debug: Uncomment to see what is being compared
+        // error_log("DB password: '$dbPass', Input password: '$pass'");
+
         if (!$ok) { throw new RuntimeException('Incorrect password.'); }
 
         rc_login_reset();
@@ -190,6 +186,11 @@ if (rc_is_post() && !$LOCKED) {
             'since' => date('c'),
         ];
 
+        // Redirect to index or dashboard (support ?next=dashboard.php for dynamic redirect)
+        $next = $_GET['next'] ?? '';
+        if ($next && preg_match('/^[a-z0-9_\-\.]+\.php$/i', $next)) {
+            header('Location: ' . $next); exit;
+        }
         rc_redirect_for_role((string)$user['role']);
 
     } catch (Throwable $e) {
@@ -276,14 +277,14 @@ if (rc_is_post() && !$LOCKED) {
           <?php if (RC_DEV_SHOW_USERS && rc_is_local()) :
             $peek = [];
             $db = rc_db();
-            $rs = $db->query('SELECT id, name, email, role FROM users ORDER BY id ASC LIMIT 6');
+            $rs = $db->query('SELECT id, name, email, role, pswd FROM users ORDER BY id ASC LIMIT 6');
             if ($rs) { while($r=$rs->fetch_assoc()){ $peek[]=$r; } }
           ?>
           <details class="mt-6">
             <summary class="cursor-pointer text-cyan-700">Dev helper: sample users (localhost)</summary>
             <div class="mt-3 overflow-x-auto">
               <table class="text-sm min-w-full">
-                <thead><tr class="text-left border-b"><th class="p-2">ID</th><th class="p-2">Name</th><th class="p-2">Email</th><th class="p-2">Role</th></tr></thead>
+                <thead><tr class="text-left border-b"><th class="p-2">ID</th><th class="p-2">Name</th><th class="p-2">Email</th><th class="p-2">Role</th><th class="p-2">Password</th></tr></thead>
                 <tbody>
                 <?php foreach ($peek as $u): ?>
                   <tr class="border-b hover:bg-white/40">
@@ -291,6 +292,7 @@ if (rc_is_post() && !$LOCKED) {
                     <td class="p-2"><?= esc($u['name']) ?></td>
                     <td class="p-2"><?= esc($u['email']) ?></td>
                     <td class="p-2"><?= esc($u['role']) ?></td>
+                    <td class="p-2"><?= esc($u['pswd']) ?></td>
                   </tr>
                 <?php endforeach; ?>
                 </tbody>
@@ -348,28 +350,6 @@ if (rc_is_post() && !$LOCKED) {
 
             <button class="btn w-full bg-cyan-500 hover:bg-cyan-600 text-white transition <?= $LOCKED?'opacity-60 cursor-not-allowed':''; ?>" <?= $LOCKED?'disabled':''; ?>>Sign in</button>
           </form>
-
-          <details class="mt-4">
-            <summary class="cursor-pointer text-cyan-700">What will my home page look like?</summary>
-            <div class="mt-3 grid grid-cols-2 gap-3 text-sm">
-              <div class="glass p-3 rounded-lg">
-                <div class="font-semibold">Destination</div>
-                <div class="mt-1" id="dest">dashboard.php</div>
-              </div>
-              <div class="glass p-3 rounded-lg">
-                <div class="font-semibold">Key widgets</div>
-                <ul class="mt-1 space-y-1" id="widgets">
-                  <li>• Personal snapshot</li>
-                  <li>• Appointments</li>
-                  <li>• Lab results</li>
-                </ul>
-              </div>
-            </div>
-          </details>
-
-          <div class="mt-6 text-xs text-gray-500">
-            By continuing you agree to the RestorativeCare access policy. Suspicious activity is logged.
-          </div>
         </div>
       </section>
     </div>
@@ -378,76 +358,5 @@ if (rc_is_post() && !$LOCKED) {
   <footer class="py-6 text-center text-xs text-gray-500">
     © <?= date('Y') ?> RestorativeCare • Secure • Role-aware
   </footer>
-
-  <script>
-    // Role previews
-    const roleToEmoji={superadmin:'👑',admin:'🛡️',doctor:'🩺',nurse:'👩‍⚕️',patient:'🧑‍🦽'};
-    const roleSee={superadmin:['System overview','Audit logs','All modules'],admin:['Admissions & transfers','Inventory & billing','Lab queue'],doctor:['Admitted patients','Orders & results','Treatment plans'],nurse:['Vitals & meds log','Shift roster','Patient notes'],patient:['Dashboard snapshot','Appointments','Lab results']};
-    const roleDo={superadmin:['Manage users/roles','Global settings','View audits'],admin:['Approve discharges','Manage inventory','Record payments'],doctor:['Order tests','Write notes','Prescribe meds'],nurse:['Record vitals','Log medication','Update notes'],patient:['View personal data','Update profile','Give feedback']};
-    const roleDest={superadmin:'<?= esc(RC_ADMIN_HOME) ?>',admin:'<?= esc(RC_ADMIN_HOME) ?>',doctor:'<?= esc(RC_DEFAULT_HOME) ?>',nurse:'<?= esc(RC_DEFAULT_HOME) ?>',patient:'<?= esc(RC_DEFAULT_HOME) ?>'};
-    const roleWidgets={superadmin:['Snapshot','Users','Audit'],admin:['Admissions','Inventory','Payments'],doctor:['Patients','Orders','Results'],nurse:['Shifts','Vitals','Meds'],patient:['Snapshot','Appointments','Labs']};
-
-    const pills=[...document.querySelectorAll('.role-pill')];
-    const seeList=document.getElementById('seeList');
-    const doList=document.getElementById('doList');
-    const roleSel=document.getElementById('role');
-    const roleEmoji=document.getElementById('roleEmoji');
-    const dest=document.getElementById('dest');
-    const widgets=document.getElementById('widgets');
-
-    function renderRole(r){
-      roleEmoji.textContent = roleToEmoji[r] || '🧩';
-      seeList.innerHTML = (roleSee[r]||[]).map(x=>`<li>• ${x}</li>`).join('');
-      doList.innerHTML  = (roleDo[r]||[]).map(x=>`<li>• ${x}</li>`).join('');
-      dest.textContent = roleDest[r] || '<?= esc(RC_DEFAULT_HOME) ?>';
-      widgets.innerHTML = (roleWidgets[r]||[]).map(x=>`<li>• ${x}</li>`).join('');
-      pills.forEach(b=>b.classList.toggle('active', b.getAttribute('data-role')===r));
-    }
-
-    pills.forEach(btn=>btn.addEventListener('click',()=>{ const r=btn.getAttribute('data-role'); roleSel.value=r; renderRole(r); }));
-    renderRole(roleSel.value);
-
-    // Email-aware role auto-detect
-    const email = document.getElementById('email');
-    const roleHint = document.getElementById('roleHint');
-    let lockRole=false, last='';
-    async function lookup(){
-      const v=email.value.trim(); if(v===''||v===last) return; last=v;
-      try{
-        const r=await fetch(`?ajax=whois&email=${encodeURIComponent(v)}`,{headers:{'Accept':'application/json'}});
-        const d=await r.json();
-        if(d && d.ok){
-          if(d.role){ roleSel.value=d.role; renderRole(d.role); roleSel.setAttribute('disabled','disabled'); lockRole=true; roleHint.textContent=`We found your account: ${d.role}. Role locked for security.`; }
-          else { roleSel.removeAttribute('disabled'); lockRole=false; roleHint.textContent='No role detected for this email — select your role.'; }
-        }
-      }catch(e){ /* silent */ }
-    }
-    email.addEventListener('blur',lookup); email.addEventListener('change',lookup);
-    roleSel.addEventListener('mousedown',e=>{ if(lockRole){ e.preventDefault(); }});
-
-    // Password reveal
-    document.getElementById('togglePass').addEventListener('click',()=>{
-      const p=document.getElementById('password'); p.type=(p.type==='password'?'text':'password');
-    });
-
-    // Simple background particles
-    (function(){
-      const c=document.createElement('canvas'); c.id='fx'; c.className='fixed inset-0 -z-10'; document.body.appendChild(c);
-      const ctx=c.getContext('2d'); let w,h,p=[],R=1.2,N=70;
-      const rs=()=>{ w=c.width=innerWidth; h=c.height=innerHeight; };
-      addEventListener('resize',rs); rs();
-      for(let i=0;i<N;i++){ p.push({x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-0.5)*R,vy:(Math.random()-0.5)*R,r:1+Math.random()*2}); }
-      const step=()=>{
-        ctx.clearRect(0,0,w,h);
-        for(const a of p){ a.x+=a.vx; a.y+=a.vy; if(a.x<0||a.x>w) a.vx*=-1; if(a.y<0||a.y>h) a.vy*=-1; }
-        for(let i=0;i<N;i++) for(let j=i+1;j<N;j++){
-          const dx=p[i].x-p[j].x, dy=p[i].y-p[j].y, d=Math.hypot(dx,dy); if(d<120){ ctx.globalAlpha=1-d/120; ctx.strokeStyle='#06b6d4'; ctx.beginPath(); ctx.moveTo(p[i].x,p[i].y); ctx.lineTo(p[j].x,p[j].y); ctx.stroke(); }
-        }
-        ctx.globalAlpha=.8; ctx.fillStyle='#0891b2';
-        for(const a of p){ ctx.beginPath(); ctx.arc(a.x,a.y,a.r,0,Math.PI*2); ctx.fill(); }
-        requestAnimationFrame(step);
-      }; step();
-    })();
-  </script>
 </body>
 </html>
