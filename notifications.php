@@ -1,10 +1,29 @@
 <?php
-// notifications.php
-// Futuristic, patient-centric Notification Center (static demo)
-// Drop into your demo folder and open via HTTP (e.g., http://localhost/notifications.php)
+
 
 $patientName = 'Riya Patel';
 $year = date('Y');
+// --- DB Connection ---
+$DB_HOST = 'localhost';
+$DB_PORT = '3307'; // Use your actual port
+$DB_USER = 'root';
+$DB_PASS = '';
+$DB_NAME = 'restorativecare';
+$mysqli = new mysqli($DB_HOST, $DB_USER, $DB_PASS, $DB_NAME, $DB_PORT);
+if ($mysqli->connect_errno) {
+  die('Database connection failed: ' . $mysqli->connect_error);
+}
+$mysqli->set_charset('utf8mb4');
+
+// --- Fetch notifications with user info ---
+$notifications = [];
+$sql = "SELECT n.id, n.user_id, n.message, n.urgency, n.created_at, n.read_at, u.name as user_name, u.role as user_role FROM notifications n JOIN users u ON n.user_id = u.id ORDER BY n.created_at DESC LIMIT 30";
+$res = $mysqli->query($sql);
+if ($res) {
+  while ($row = $res->fetch_assoc()) {
+    $notifications[] = $row;
+  }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -12,6 +31,11 @@ $year = date('Y');
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Notifications — RestorativeCare (Demo)</title>
+
+    <script>
+      // PHP to JS: notifications from DB
+      const notifications = <?php echo json_encode($notifications); ?>;
+    </script>
 
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -291,16 +315,8 @@ $year = date('Y');
    Each notification includes:
    id, type, tone, title, message, datetime, urgency (0-100), cluster (optional), doctorNote (opt)
    ============================ */
-const notifications = [
-  { id: 'n1', type:'lab', tone:'critical', title:'Critical Lab Result', msg:'Potassium level critically low (2.9 mmol/L). Immediate action required.', datetime:'2025-08-14T09:12', urgency:95, cluster:'labs', doctorNoteAudio:null, dataPeek:{label:'Potassium', values:[4.2,4.0,3.8,3.5,2.9]} },
-  { id: 'n2', type:'reminder', tone:'remind', title:'Medication Reminder', msg:'Cefixime — take 1 tablet now.', datetime:'2025-08-14T08:00', urgency:45, cluster:'meds' },
-  { id: 'n3', type:'appt', tone:'info', title:'Appointment Tomorrow', msg:'Orthopedics OPD — Aug 15, 2025 • 10:30 AM with Dr. Mehta.', datetime:'2025-08-15T10:30', urgency:30, cluster:'appts', doctorNoteAudio:'https://cdn.pixabay.com/download/audio/2022/03/15/audio_6d746a98b2.mp3?filename=beep-01-47023.mp3' },
-  { id: 'n4', type:'check', tone:'positive', title:'Good Progress', msg:'Your physiotherapy notes show improved range of motion — keep it up!', datetime:'2025-08-13T18:00', urgency:10 },
-  { id: 'n5', type:'message', tone:'warning', title:'Message from Care Team', msg:'Please confirm availability for discharge planning meeting.', datetime:'2025-08-13T11:00', urgency:55, cluster:'messages' },
-  { id: 'n6', type:'med', tone:'remind', title:'Medication Cluster', msg:'You have 3 medication reminders today — tap to view them grouped.', datetime:'2025-08-14T07:00', urgency:40, cluster:'meds' },
-  { id: 'n7', type:'nudge', tone:'positive', title:'Milestone', msg:'30 days medication adherence — reward unlocked!', datetime:'2025-08-12T09:00', urgency:5 },
-  { id: 'n8', type:'alert', tone:'critical', title:'Missed Dose Alert', msg:'A recent critical dose was missed. Please contact your care team.', datetime:'2025-08-14T06:45', urgency:85 }
-];
+
+// notifications array is now loaded from PHP above
 
 // UI state
 let selectedNotificationId = null;
@@ -342,36 +358,8 @@ function buildFeed(data = notifications){
   const list = [...data];
 
   // sorting
-  if (currentSort === 'urgency') list.sort((a,b)=> b.urgency - a.urgency);
-  if (currentSort === 'time') list.sort((a,b)=> new Date(b.datetime) - new Date(a.datetime));
-  // progress-based sorting (example): keep positive/next-step first
-  if (currentSort === 'progress') list.sort((a,b)=> (a.tone==='positive'? -1:1) - (b.tone==='positive'? -1:1));
-
-  // cluster: group by cluster key if enabled
-  if (clusterOpen){
-    const grouped = {};
-    list.forEach(n => {
-      const key = n.cluster || '_nocluster_' + n.id;
-      if (!grouped[key]) grouped[key] = [];
-      grouped[key].push(n);
-    });
-    for (const k of Object.keys(grouped)){
-      if (grouped[k].length > 1){
-        // cluster card
-        const ccard = document.createElement('div');
-        ccard.className = 'glass p-3 rounded-lg card-deep';
-        ccard.innerHTML = <div class="font-semibold">${grouped[k].length} related items</div><div class="muted text-sm mt-1">Tap to expand</div>;
-        ccard.addEventListener('click', ()=> {
-          // expand cluster into individual cards (simple toggle)
-          grouped[k].forEach(n => insertNotifCard(n, feed));
-        });
-        feed.appendChild(ccard);
-      } else {
-        insertNotifCard(grouped[k][0], feed);
-      }
-    }
-    return;
-  }
+  if (currentSort === 'urgency') list.sort((a,b)=> b.urgency.localeCompare(a.urgency));
+  if (currentSort === 'time') list.sort((a,b)=> new Date(b.created_at) - new Date(a.created_at));
 
   // normal render
   list.forEach(n => insertNotifCard(n, feed));
@@ -380,7 +368,7 @@ function buildFeed(data = notifications){
 /* Insert individual notification card into container (feed) */
 function insertNotifCard(n, container){
   const card = document.createElement('div');
-  card.className = notif ${toneClass(n.tone)} card-deep;
+  card.className = notif card-deep;
   card.setAttribute('role','article');
   card.setAttribute('tabindex','0');
   card.id = 'card-'+n.id;
@@ -388,7 +376,6 @@ function insertNotifCard(n, container){
   // dot color
   const dot = document.createElement('div');
   dot.className = 'dot';
-  // small color indicator (use subtle shadow)
   dot.style.background = 'rgba(255,255,255,0.9)';
   dot.style.boxShadow = '0 6px 16px rgba(0,0,0,0.08)';
 
@@ -397,13 +384,13 @@ function insertNotifCard(n, container){
   content.className = 'content';
   const title = document.createElement('div');
   title.className = 'title';
-  title.innerText = n.title;
+  title.innerText = n.user_name ? ${n.user_name} : 'Notification';
   const msg = document.createElement('div');
   msg.className = 'text-sm';
-  msg.innerText = n.msg;
+  msg.innerText = n.message;
   const meta = document.createElement('div');
   meta.className = 'meta';
-  meta.innerText = ${niceDateTime(n.datetime)} • Urgency ${n.urgency}%;
+  meta.innerText = ${niceDateTime(n.created_at)} • Urgency: ${n.urgency};
 
   // side actions
   const actions = document.createElement('div');
@@ -422,43 +409,8 @@ function insertNotifCard(n, container){
   snoozeBtn.innerText = 'Snooze';
   snoozeBtn.onclick = (e)=> { e.stopPropagation(); smartSnooze(n.id); };
 
-  const explainBtn = document.createElement('button');
-  explainBtn.className = 'btn btn-ghost tooltip';
-  explainBtn.innerText = 'Explain';
-  explainBtn.setAttribute('data-tip','Explain this term in plain language');
-  explainBtn.onclick = (e) => { e.stopPropagation(); showExplain(n); };
-
   actions.appendChild(ackBtn);
   actions.appendChild(snoozeBtn);
-  actions.appendChild(explainBtn);
-
-  // attach mini visual peek for lab items
-  if (n.dataPeek){
-    const canvas = document.createElement('canvas');
-    canvas.width = 220; canvas.height = 60;
-    canvas.className = 'mt-2';
-    // render sparkline
-    setTimeout(()=> {
-      new Chart(canvas.getContext('2d'), {
-        type:'line',
-        data:{ labels: n.dataPeek.values.map((_,i)=>i+1), datasets:[{ data: n.dataPeek.values, borderColor:'rgba(255,255,255,0.9)', backgroundColor:'rgba(255,255,255,0.08)', tension:0.3, pointRadius:0 }]},
-        options:{ plugins:{ legend:{display:false}}, scales:{ x:{display:false}, y:{display:false} }, elements:{ line:{borderWidth:2} } }
-      });
-    }, 40);
-    content.appendChild(canvas);
-  }
-
-  // doctor voice note icon
-  if (n.doctorNoteAudio){
-    const audioBtn = document.createElement('button');
-    audioBtn.className = 'btn btn-ghost';
-    audioBtn.innerText = 'Doctor Note ▶';
-    audioBtn.onclick = (e)=> {
-      e.stopPropagation();
-      playDoctorNote(n);
-    };
-    actions.appendChild(audioBtn);
-  }
 
   content.appendChild(title);
   content.appendChild(msg);
@@ -468,7 +420,6 @@ function insertNotifCard(n, container){
   card.appendChild(content);
   card.appendChild(actions);
 
-  // click selects notification
   card.addEventListener('click', ()=> selectNotification(n.id));
   card.addEventListener('keydown', (e)=> { if (e.key === 'Enter') selectNotification(n.id); });
 
@@ -526,13 +477,13 @@ function showExplain(n){
   const body = document.getElementById('explainBody');
   // simple rule-based explanation
   if (n.type === 'lab' && n.dataPeek && n.dataPeek.label) {
-    body.innerHTML = `<strong>${n.dataPeek.label}</strong> — lab values vary over time. A value lower than normal may need immediate attention. In your case, the latest value is ${n.dataPeek.values.slice(-1)[0]}. If unsure, contact your care team.`;
+    body.innerHTML = <strong>${n.dataPeek.label}</strong> — lab values vary over time. A value lower than normal may need immediate attention. In your case, the latest value is ${n.dataPeek.values.slice(-1)[0]}. If unsure, contact your care team.;
   } else if (n.title.toLowerCase().includes('potassium')) {
-    body.innerHTML = `<strong>Potassium (K)</strong> is an electrolyte important for heart and muscle function. Low levels can be serious and may cause weakness or heart rhythm changes. Your team will advise next steps.`;
+    body.innerHTML = <strong>Potassium (K)</strong> is an electrolyte important for heart and muscle function. Low levels can be serious and may cause weakness or heart rhythm changes. Your team will advise next steps.;
   } else if (n.type === 'med' || n.type === 'reminder') {
-    body.innerHTML = `This is a medication reminder. It helps keep your treatment consistent. If you have side-effects or can't take the medicine, please contact your care team.`;
+    body.innerHTML = This is a medication reminder. It helps keep your treatment consistent. If you have side-effects or can't take the medicine, please contact your care team.;
   } else {
-    body.innerHTML = `This alert contains information from your care team. If something is unclear, press "Ask a doctor" or call the hospital.`;
+    body.innerHTML = This alert contains information from your care team. If something is unclear, press "Ask a doctor" or call the hospital.;
   }
   document.getElementById('explainModal').style.display = 'flex';
 }
@@ -561,17 +512,17 @@ function selectNotification(id){
     return;
   }
   // Build detail HTML
-  let html = `<div class="font-semibold">${n.title}</div>`;
-  html += `<div class="muted text-sm">${niceDateTime(n.datetime)} • Urgency ${n.urgency}%</div>`;
-  html += `<div class="mt-3">${n.msg}</div>`;
+  let html = <div class="font-semibold">${n.title}</div>;
+  html += <div class="muted text-sm">${niceDateTime(n.datetime)} • Urgency ${n.urgency}%</div>;
+  html += <div class="mt-3">${n.msg}</div>;
   if (n.dataPeek) {
-    html += `<div class="mt-3 tiny muted">Quick data peek:</div><canvas id="detailChart" width="320" height="100"></canvas>`;
+    html += <div class="mt-3 tiny muted">Quick data peek:</div><canvas id="detailChart" width="320" height="100"></canvas>;
   }
   if (n.doctorNoteAudio) {
-    html += `<div class="mt-3"><button class="btn btn-ghost" id="playDocNoteBtn">Play Doctor Note</button></div>`;
+    html += <div class="mt-3"><button class="btn btn-ghost" id="playDocNoteBtn">Play Doctor Note</button></div>;
   }
   // action buttons
-  html += `<div class="mt-4 flex gap-2"><button class="btn btn-primary" id="askDocBtn">Ask a doctor</button><button class="btn" id="remindLaterBtn">Remind me later</button></div>`;
+  html += <div class="mt-4 flex gap-2"><button class="btn btn-primary" id="askDocBtn">Ask a doctor</button><button class="btn" id="remindLaterBtn">Remind me later</button></div>;
   pane.innerHTML = html;
 
   // if dataPeek chart required, render it
@@ -650,7 +601,7 @@ document.getElementById('sortBtn').addEventListener('click', ()=> {
   if (currentSort === 'urgency') currentSort = 'time';
   else if (currentSort === 'time') currentSort = 'progress';
   else currentSort = 'urgency';
-  document.getElementById('sortBtn').innerText = `Sort: ${currentSort.charAt(0).toUpperCase() + currentSort.slice(1)}`;
+  document.getElementById('sortBtn').innerText = Sort: ${currentSort.charAt(0).toUpperCase() + currentSort.slice(1)};
   buildFeed();
 });
 
@@ -670,9 +621,9 @@ document.getElementById('avatarSpeak').addEventListener('click', avatarSpeak);
 function avatarSpeak(){
   // pick top 3 by urgency
   const top = [...notifications].sort((a,b)=> b.urgency - a.urgency).slice(0,3);
-  const text = top.map(t => `${t.title}. ${t.msg}`).join(' Next: ');
+  const text = top.map(t => ${t.title}. ${t.msg}).join(' Next: ');
   if ('speechSynthesis' in window) {
-    const u = new SpeechSynthesisUtterance(`Hello ${<?php echo json_encode($patientName); ?>}. ${text}`);
+    const u = new SpeechSynthesisUtterance(Hello ${<?php echo json_encode($patientName); ?>}. ${text});
     u.lang = 'en-US';
     u.rate = 0.95;
     speechSynthesis.speak(u);
@@ -704,7 +655,7 @@ document.getElementById('calendarOverlay').addEventListener('click', ()=> {
 
 /* family toggle */
 document.getElementById('familyToggle').addEventListener('change', (e)=> {
-  showToast(`Family notifications ${e.target.checked ? 'enabled' : 'disabled'} (demo).`);
+  showToast(Family notifications ${e.target.checked ? 'enabled' : 'disabled'} (demo).);
 });
 
 /* Explain Selected */
@@ -735,7 +686,7 @@ function showToast(msg){
     t.style.zIndex = 200;
     document.body.appendChild(t);
   }
-  t.innerHTML = `<div class="glass p-3 rounded-lg card-deep animate__animated animate__fadeInUp">${msg}</div>`;
+  t.innerHTML = <div class="glass p-3 rounded-lg card-deep animate__animated animate__fadeInUp">${msg}</div>;
   setTimeout(()=> { if (t) t.innerHTML = ''; }, 2600);
 }
 

@@ -1,6 +1,5 @@
 <?php
-// index.php — RestorativeCare (Premium Home) — single-file drop-in
-// NOTE: keep every page in the same folder as requested (admit.php, schedule.php, dashboard.php, etc.)
+
 $year = date('Y');
 function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 ?>
