@@ -309,7 +309,8 @@ $flashOk = flash('ok'); $flashErr = flash('err');
   </div>
   <div class="flex items-center gap-3">
     <div class="text-sm text-gray-600">Signed in as <span class="font-semibold"><?php echo esc($userName); ?></span> (<?php echo esc($userRole); ?>)</div>
-    <a href="dashboard.php" class="text-sm text-cyan-600 hover:underline">Patient View</a>
+    <a href="logout.php" class="text-sm text-cyan-600 hover:underline">Logout</a>
+    <a href="index.php" class="text-sm text-cyan-600 hover:underline">Patient View</a>
   </div>
 </header>
 

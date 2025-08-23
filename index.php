@@ -4,6 +4,50 @@
 $year = date('Y');
 function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 ?>
+<?php
+// DB connection (adjust if already connected above)
+$DB_HOST = 'localhost';
+$DB_PORT = '3307';
+$DB_USER = 'root';  // change if different
+$DB_PASS = '';      // change if you set password
+$DB_NAME = 'restorativecare';
+
+$conn = new mysqli($DB_HOST, $DB_USER, $DB_PASS, $DB_NAME, $DB_PORT);
+if ($conn->connect_error) {
+    die("DB connection failed: " . $conn->connect_error);
+}
+
+
+ // change to your real total
+
+
+// Count admitted patients
+$totalBeds = 48; // change this to your actual capacity
+
+$sql = "SELECT COUNT(*) AS occupied FROM admissions WHERE status='admitted'";
+$res = $conn->query($sql);
+
+$occupied = 0; // default
+if ($res && $row = $res->fetch_assoc()) {
+    $occupied = (int)$row['occupied'];
+}
+$available = $totalBeds - $occupied;
+?>
+
+
+
+<?php
+$today = date("Y-m-d");
+$sql2 = "SELECT COUNT(*) AS total 
+         FROM appointments 
+         WHERE status='scheduled' AND DATE(scheduled_at) = '$today'";
+$res2 = $conn->query($sql2);
+
+$todayAppointments = 0; // default
+if ($res2 && $row2 = $res2->fetch_assoc()) {
+    $todayAppointments = (int)$row2['total'];
+}
+?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -309,7 +353,13 @@ function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
         <a href="contact.php">Contact</a>
       </div>
       <div class="nav-cta flex items-center gap-2">
-        <a href="Login.php" class="btn btn-ghost">Login </a>
+        <?php 
+          if(isset($_SESSION['user_id'])){
+            echo '<a href="logout.php" class="btn btn-ghost">Logout </a>';
+          }else{
+            echo '<a href="Login.php" class="btn btn-ghost">Login </a>';
+          }
+        ?>
         <a href="dashboard.php" class="btn btn-ghost">Dashboard</a>
         <a href="admit.php" class="btn btn-primary">Admit Patient</a>
         <button id="navToggle" class="md:hidden btn btn-ghost" aria-label="Menu">
@@ -377,20 +427,24 @@ function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 
   <div class="absolute -bottom-4 -left-6 glass p-3 rounded-xl shadow-deep">
     <div class="text-xs muted">Today</div>
-    <div class="font-extrabold text-lg">12 Appointments</div>
-  </div>
-  <div class="absolute -top-6 -right-6 glass p-3 rounded-xl shadow-deep">
+    <div class="font-extrabold text-lg">
+        <?php echo $todayAppointments; ?> Appointments
+    </div>
+</div>
+<div class="absolute -top-6 -right-6 glass p-3 rounded-xl shadow-deep">
     <div class="text-xs muted">Bed Availability</div>
-    <div class="font-extrabold text-lg"><span id="bedsFree">34</span> / 48</div>
-  </div>
+    <div class="font-extrabold text-lg">
+        <span id="bedsFree"><?php echo $available; ?></span> / <?php echo $totalBeds; ?>
+    </div>
+</div>
 </div>
 
 
-  <div class="absolute -top-6 -right-6 glass p-3 rounded-xl shadow-deep">
+  <!-- <div class="absolute -top-6 -right-6 glass p-3 rounded-xl shadow-deep">
     <div class="text-xs muted">Bed Availability</div>
     <div class="font-extrabold text-lg"><span id="bedsFree">34</span> / 48</div>
-  </div>
-</div>
+  </div> -->
+
 
 
        
@@ -398,10 +452,10 @@ function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
           <div class="text-xs muted">Today</div>
           <div class="font-extrabold text-lg">12 Appointments</div>
         </div> -->
-        <div class="absolute -top-6 -right-6 glass p-3 rounded-xl shadow-deep">
+        <!-- <div class="absolute -top-6 -right-6 glass p-3 rounded-xl shadow-deep">
           <div class="text-xs muted">Bed Availability</div>
           <div class="font-extrabold text-lg"><span id="bedsFree">34</span> / 48</div>
-        </div>
+        </div> -->
       
     </div>
   </section>
