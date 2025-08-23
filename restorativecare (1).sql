@@ -2,8 +2,8 @@
 -- version 5.2.1
 -- https://www.phpmyadmin.net/
 --
--- Host: localhost:3307
--- Generation Time: Aug 23, 2025 at 05:54 PM
+-- Host: 127.0.0.1
+-- Generation Time: Aug 23, 2025 at 10:08 PM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
@@ -344,6 +344,27 @@ INSERT INTO `discharge_summaries` (`id`, `admission_id`, `summary`, `pdf_path`, 
 (6, 6, 'Discharge summary 6', 'discharge/summary_6.pdf', 'qr/discharge_6.png', '2025-08-12 10:30:00'),
 (7, 7, 'Discharge summary 7', 'discharge/summary_7.pdf', 'qr/discharge_7.png', '2025-08-12 11:30:00'),
 (8, 8, 'Discharge summary 8', 'discharge/summary_8.pdf', 'qr/discharge_8.png', '2025-08-12 12:30:00');
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `doctors`
+--
+
+CREATE TABLE `doctors` (
+  `id` int(11) NOT NULL,
+  `user_id` int(11) NOT NULL,
+  `specialty` varchar(100) DEFAULT NULL,
+  `is_available` tinyint(1) DEFAULT 1
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `doctors`
+--
+
+INSERT INTO `doctors` (`id`, `user_id`, `specialty`, `is_available`) VALUES
+(1, 5, 'General Medicine', 1),
+(2, 6, 'Orthopedics', 1);
 
 -- --------------------------------------------------------
 
@@ -914,6 +935,24 @@ INSERT INTO `payments` (`id`, `patient_id`, `amount`, `method`, `status`, `creat
 -- --------------------------------------------------------
 
 --
+-- Table structure for table `pharmacies`
+--
+
+CREATE TABLE `pharmacies` (
+  `id` int(11) NOT NULL,
+  `name` varchar(255) NOT NULL,
+  `address` varchar(255) NOT NULL,
+  `latitude` decimal(10,7) NOT NULL,
+  `longitude` decimal(10,7) NOT NULL,
+  `phone` varchar(20) DEFAULT NULL,
+  `hours` varchar(255) DEFAULT NULL,
+  `website` varchar(255) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
 -- Table structure for table `resources`
 --
 
@@ -1169,6 +1208,13 @@ ALTER TABLE `discharge_summaries`
   ADD KEY `idx_admission_id` (`admission_id`);
 
 --
+-- Indexes for table `doctors`
+--
+ALTER TABLE `doctors`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `user_id` (`user_id`);
+
+--
 -- Indexes for table `donor_requests`
 --
 ALTER TABLE `donor_requests`
@@ -1314,6 +1360,13 @@ ALTER TABLE `payments`
   ADD KEY `patient_id` (`patient_id`);
 
 --
+-- Indexes for table `pharmacies`
+--
+ALTER TABLE `pharmacies`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `lat_lng_idx` (`latitude`,`longitude`);
+
+--
 -- Indexes for table `resources`
 --
 ALTER TABLE `resources`
@@ -1425,6 +1478,12 @@ ALTER TABLE `contact_messages`
 --
 ALTER TABLE `discharge_summaries`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=9;
+
+--
+-- AUTO_INCREMENT for table `doctors`
+--
+ALTER TABLE `doctors`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
 
 --
 -- AUTO_INCREMENT for table `donor_requests`
@@ -1547,6 +1606,12 @@ ALTER TABLE `payments`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=9;
 
 --
+-- AUTO_INCREMENT for table `pharmacies`
+--
+ALTER TABLE `pharmacies`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
+
+--
 -- AUTO_INCREMENT for table `resources`
 --
 ALTER TABLE `resources`
@@ -1642,6 +1707,12 @@ ALTER TABLE `consent_forms`
 --
 ALTER TABLE `discharge_summaries`
   ADD CONSTRAINT `discharge_summaries_ibfk_1` FOREIGN KEY (`admission_id`) REFERENCES `admissions` (`id`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `doctors`
+--
+ALTER TABLE `doctors`
+  ADD CONSTRAINT `doctors_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`);
 
 --
 -- Constraints for table `ecg_data`
