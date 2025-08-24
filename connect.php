@@ -9,7 +9,7 @@ if (!function_exists('esc')) {
 
 // DB connection
 $DB_HOST = 'localhost';
-$DB_PORT = '3306';
+$DB_PORT = '3307';
 $DB_USER = 'root';  // change if different
 $DB_PASS = '';      // change if you set password
 $DB_NAME = 'restorativecare';
@@ -230,9 +230,9 @@ if ($result) {
       <a href="index.php" class="text-2xl font-bold text-cyan-600">RestorativeCare</a>
       <nav class="hidden md:flex space-x-6">
         <a href="index.php" class="font-medium hover:text-cyan-600">Home</a>
-        <a href="dashboard.php" class="font-medium hover:text-cyan-600">Dashboard</a>
+        <!-- <a href="dashboard.php" class="font-medium hover:text-cyan-600">Dashboard</a>
         <a href="admit.php" class="font-medium hover:text-cyan-600">Admit Patient</a>
-        <a href="notifications.php" class="font-medium hover:text-cyan-600">Notifications</a>
+        <a href="notifications.php" class="font-medium hover:text-cyan-600">Notifications</a> -->
         <a href="connect.php" class="font-medium text-cyan-600">Connect to Doctor</a>
         <a href="contact.php" class="font-medium hover:text-cyan-600">Contact</a>
       </nav>
@@ -296,7 +296,7 @@ if ($result) {
           </div>
         <?php endif; ?>
       </div>
-
+      
       <!-- Call Panel -->
       <div id="call-panel" class="col-span-2 hidden">
         <div class="relative video-container">
@@ -404,7 +404,11 @@ if ($result) {
       </div>
     </div>
   </main>
-
+              <div class="mt-3 flex-center space-x-2">
+                  <button class="start-video-call btn-primary text-sm py-1 px-3 flex items-center">
+                    <a href="pharmacy_finder.php"> Find A Pharmacy Near By</a>
+                  </button>
+                </div>
   <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.6.1/dist/socket.io.min.js"></script>
   <script>
     document.addEventListener('DOMContentLoaded', function() {

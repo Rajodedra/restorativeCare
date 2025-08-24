@@ -9,7 +9,7 @@ function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 
 /* ----------------------------- DB Connection -------------------------------- */
 $DB_HOST = 'localhost';
-$DB_PORT = '3306';
+$DB_PORT = '3307';
 $DB_USER = 'root';
 $DB_PASS = "";
 $DB_NAME = 'restorativecare';
@@ -470,9 +470,6 @@ $lastUpdatedHuman = (new DateTime())->format('M j, Y — h:i A');
       <a href="schedule.php" class="text-sm text-gray-600 hover:text-cyan-600">Schedule</a>
       <a href="notifications.php" class="text-sm text-gray-600 hover:text-cyan-600">Notifications</a>
       <a href="mental-health.php" class="text-sm text-gray-600 hover:text-cyan-600">Mental Health</a>
-      <a href="find_pharmacy.php" class="text-sm text-gray-600 hover:text-cyan-600">
-        <i class="fas fa-pills"></i> <span>Find Nearby Pharmacies</span>
-      </a>
       <a href="discharge.php" class="ml-3 px-4 py-2 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600">Discharge Toolkit</a>
     </div>
   </header>

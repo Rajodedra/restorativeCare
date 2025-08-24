@@ -1,33 +1,50 @@
 <?php
-// index.php — RestorativeCare (Premium Home) — single-file drop-in
-// NOTE: keep every page in the same folder as requested (admit.php, schedule.php, dashboard.php, etc.)
+
 $year = date('Y');
 function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+?>
+<?php
+// DB connection (adjust if already connected above)
+$DB_HOST = 'localhost';
+$DB_PORT = '3307';
+$DB_USER = 'root';  // change if different
+$DB_PASS = '';      // change if you set password
+$DB_NAME = 'restorativecare';
 
-// Use the shared DB connection from connect.php
-// require_once 'connect.php';
+$conn = new mysqli($DB_HOST, $DB_USER, $DB_PASS, $DB_NAME, $DB_PORT);
+if ($conn->connect_error) {
+    die("DB connection failed: " . $conn->connect_error);
+}
+
+
+ // change to your real total
+
 
 // Count admitted patients
 $totalBeds = 48; // change this to your actual capacity
 
 $sql = "SELECT COUNT(*) AS occupied FROM admissions WHERE status='admitted'";
-$res = $mysqli->query($sql);
+$res = $conn->query($sql);
 
 $occupied = 0; // default
 if ($res && $row = $res->fetch_assoc()) {
-  $occupied = (int)$row['occupied'];
+    $occupied = (int)$row['occupied'];
 }
 $available = $totalBeds - $occupied;
+?>
 
+
+
+<?php
 $today = date("Y-m-d");
 $sql2 = "SELECT COUNT(*) AS total 
-     FROM appointments 
-     WHERE status='scheduled' AND DATE(scheduled_at) = '$today'";
-$res2 = $mysqli->query($sql2);
+         FROM appointments 
+         WHERE status='scheduled' AND DATE(scheduled_at) = '$today'";
+$res2 = $conn->query($sql2);
 
 $todayAppointments = 0; // default
 if ($res2 && $row2 = $res2->fetch_assoc()) {
-  $todayAppointments = (int)$row2['total'];
+    $todayAppointments = (int)$row2['total'];
 }
 ?>
 <!DOCTYPE html>
@@ -333,11 +350,13 @@ if ($res2 && $row2 = $res2->fetch_assoc()) {
          <a class="font-extrabold" href="blog.php">Blog</a>
         <a href="about.php">About</a>
         <a href="contact.php">Contact</a>
+        <a href="connect.php" class="block p-2 rounded hover:bg-cyan-50">Connect to a Doctor</a>
       </div>
       <div class="nav-cta flex items-center gap-2">
         <?php 
           if(isset($_SESSION['user_id'])){
             echo '<a href="logout.php" class="btn btn-ghost">Logout </a>';
+            echo '<a herf="connect.php" class="btn btn-ghost">Connect to Doctor</a>';
           }else{
             echo '<a href="Login.php" class="btn btn-ghost">Login </a>';
           }
@@ -352,13 +371,11 @@ if ($res2 && $row2 = $res2->fetch_assoc()) {
     <!-- mobile dropdown -->
     <div id="mobileMenu" class="glass mt-2 p-3 hidden md:hidden">
       <a href="index.php" class="block p-2 rounded hover:bg-cyan-50">Home</a>
-      <!-- <a href="features.php" class="block p-2 rounded hover:bg-cyan-50">Features</a> -->
+      <a href="features.php" class="block p-2 rounded hover:bg-cyan-50">Features</a>
       <a href="about.php" class="block p-2 rounded hover:bg-cyan-50">About</a>
       <a href="contact.php" class="block p-2 rounded hover:bg-cyan-50">Contact</a>
       <a href="dashboard.php" class="block p-2 rounded hover:bg-cyan-50">Dashboard</a>
-      <!-- <a href="admit.php" class="block p-2 rounded hover:bg-cyan-50">Admit Patient</a> -->
-      <a href="connect.php" class="block p-2 rounded hover:bg-cyan-50">Connect to Doctor</a>
-
+      <a href="admit.php" class="block p-2 rounded hover:bg-cyan-50">Admit Patient</a>
     </div>
   </div>
 
@@ -763,22 +780,22 @@ if ($res2 && $row2 = $res2->fetch_assoc()) {
         href:'schedule.php',
         badge:'Real-time'
       },
-      // {
-      //   key:'admit',
-      //   title:'Admit Patient',
-      //   desc:'Create a complete profile and start care in minutes.',
-      //   icon:'user-plus',
-      //   href:'admit.php',
-      //   badge:'Fast Intake'
-      // },
-      // {
-      //   key:'notifications',
-      //   title:'Notifications',
-      //   desc:'A gentle, patient-centric alert center.',
-      //   icon:'bell',
-      //   href:'notifications.php',
-      //   badge:'Calm Alerts'
-      // },
+      {
+        key:'admit',
+        title:'Admit Patient',
+        desc:'Create a complete profile and start care in minutes.',
+        icon:'user-plus',
+        href:'admit.php',
+        badge:'Fast Intake'
+      },
+      {
+        key:'notifications',
+        title:'Notifications',
+        desc:'A gentle, patient-centric alert center.',
+        icon:'bell',
+        href:'notifications.php',
+        badge:'Calm Alerts'
+      },
       {
         key:'wellbeing',
         title:'Well-being & Support',
@@ -811,15 +828,6 @@ if ($res2 && $row2 = $res2->fetch_assoc()) {
         href:'billing.php',
         badge:'Transparent'
       }
-      ,
-{
-  key:'connect',
-  title:'Connect to Doctor',
-  desc:'Instant video or audio consultations with real-time subtitles.',
-  icon:'video',
-  href:'connect.php',
-  badge:'Live Chat'
-}
     ];
 
     const carousel = document.getElementById('carousel');

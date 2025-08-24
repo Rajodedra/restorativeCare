@@ -11,7 +11,7 @@ function csrf_check($t){ return isset($_SESSION['csrf']) && hash_equals($_SESSIO
 
 /* ----------------------------- DB Connection -------------------------------- */
 $DB_HOST = 'localhost';
-$DB_PORT = '3306';
+$DB_PORT = '3307';
 $DB_USER = 'root';
 $DB_PASS = '';
 $DB_NAME = 'restorativecare';
